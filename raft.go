@@ -30,6 +30,7 @@ import (
 	"go.etcd.io/raft/v3/confchange"
 	"go.etcd.io/raft/v3/quorum"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/raft/v3/stability"
 	"go.etcd.io/raft/v3/tracker"
 )
 
@@ -288,6 +289,70 @@ type Config struct {
 
 	// raft state tracer
 	TraceLogger TraceLogger
+
+	// StabilityScorer, if non-nil, enables HeirRaft (DESIGN.md): the leader
+	// designates the most stable, log-complete follower as "heir" and biases
+	// timing/dispatch/handover toward it. nil disables all HeirRaft
+	// behaviour -- the mechanism is inert and behaviour is byte-identical to
+	// stock. Voting/commit rules are never affected, with or without a
+	// scorer set.
+	StabilityScorer stability.Scorer
+
+	// HeirElection enables heir-biased randomized election timeouts
+	// (DESIGN.md §2.5): the heir fires first on leader crash, non-heirs
+	// deliberately wait longer. Requires StabilityScorer to be set.
+	HeirElection bool
+	// HeirLogPriority sends MsgApp to the heir first (DESIGN.md §2.7) --
+	// dispatch ordering only, no change to commit/quorum semantics. Requires
+	// StabilityScorer to be set.
+	HeirLogPriority bool
+	// GracefulHandover enables proactive leadership transfer to the heir on
+	// self-detected leader degradation (DESIGN.md §2.6), reusing the
+	// existing MsgTimeoutNow transfer path. Requires StabilityScorer to be
+	// set.
+	GracefulHandover bool
+
+	// The following are HeirRaft tunables (DESIGN.md §5). All default to
+	// the values below when left at their zero value; this is safe even
+	// when every HeirRaft flag above is false, since they're then unused.
+
+	// MaxHeirLag is the log-lag eligibility bound (in entries): a follower
+	// more than MaxHeirLag entries behind the leader's last index cannot be
+	// heir. Default: 256.
+	MaxHeirLag uint64
+	// HysteresisMargin is the minimum score lead (out of 255) a challenger
+	// must have over the current heir before replacing it, to prevent
+	// churn. Default: 20.
+	HysteresisMargin uint8
+	// MinHeirTenure is the minimum number of heartbeat intervals a heir must
+	// hold the role before it can be replaced by a higher-scoring
+	// challenger (churn control; ineligibility still forces replacement
+	// immediately). Default: 10.
+	MinHeirTenure int
+	// HeirJitter is the heir's own randomized-timeout jitter, as a fraction
+	// of electionTimeout (heir fires at T + rand(HeirJitter*T)). Must be in
+	// (0,1]. Default: 0.1.
+	HeirJitter float64
+	// NonHeirBackoff is the multiplier non-heirs apply to their randomized
+	// election timeout when a live heir is known (T4.5: backoff*T +
+	// rand(T)), so the heir fires first. Must be in [1,2] per DESIGN.md
+	// §2.5. Default: 1.5.
+	NonHeirBackoff float64
+	// HeirStaleness is how many heartbeat intervals a heir announcement
+	// remains valid without a refresh before it's treated as stale (falling
+	// back to vanilla timeout behaviour). Default: 4.
+	HeirStaleness int
+	// HandoverThreshold is the leader's own score (out of 255) below which,
+	// sustained for DegradeWindow ticks, a graceful handover is considered.
+	// Default: 64.
+	HandoverThreshold uint8
+	// DegradeWindow is the number of consecutive ticks the leader's score
+	// must stay below HandoverThreshold before a graceful handover
+	// triggers (anti-flap filter). Default: 5.
+	DegradeWindow int
+	// HandoverCooldown is the minimum number of election timeouts between
+	// voluntary graceful handovers, to prevent ping-pong. Default: 10.
+	HandoverCooldown int
 }
 
 func (c *Config) validate() error {
@@ -335,6 +400,62 @@ func (c *Config) validate() error {
 
 	if c.ReadOnlyOption == ReadOnlyLeaseBased && !c.CheckQuorum {
 		return errors.New("CheckQuorum must be enabled when ReadOnlyOption is ReadOnlyLeaseBased")
+	}
+
+	if err := c.validateHeirRaft(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateHeirRaft checks and defaults the HeirRaft Config surface
+// (DESIGN.md §5). With StabilityScorer nil and every HeirRaft flag false --
+// the default -- this only fills in tunable defaults that nothing reads yet;
+// behaviour stays byte-identical to stock (CLAUDE.md constraint 4).
+func (c *Config) validateHeirRaft() error {
+	if (c.HeirElection || c.HeirLogPriority || c.GracefulHandover) && c.StabilityScorer == nil {
+		return errors.New("HeirElection, HeirLogPriority, and GracefulHandover require a non-nil StabilityScorer")
+	}
+
+	if c.MaxHeirLag == 0 {
+		c.MaxHeirLag = 256
+	}
+	if c.HysteresisMargin == 0 {
+		c.HysteresisMargin = 20
+	}
+	if c.MinHeirTenure == 0 {
+		c.MinHeirTenure = 10
+	} else if c.MinHeirTenure < 0 {
+		return errors.New("MinHeirTenure must be >= 0")
+	}
+	if c.HeirJitter == 0 {
+		c.HeirJitter = 0.1
+	} else if c.HeirJitter < 0 || c.HeirJitter > 1 {
+		return errors.New("HeirJitter must be in (0,1]")
+	}
+	if c.NonHeirBackoff == 0 {
+		c.NonHeirBackoff = 1.5
+	} else if c.NonHeirBackoff < 1 || c.NonHeirBackoff > 2 {
+		return errors.New("NonHeirBackoff must be in [1,2]")
+	}
+	if c.HeirStaleness == 0 {
+		c.HeirStaleness = 4
+	} else if c.HeirStaleness < 0 {
+		return errors.New("HeirStaleness must be >= 0")
+	}
+	if c.HandoverThreshold == 0 {
+		c.HandoverThreshold = 64
+	}
+	if c.DegradeWindow == 0 {
+		c.DegradeWindow = 5
+	} else if c.DegradeWindow < 0 {
+		return errors.New("DegradeWindow must be >= 0")
+	}
+	if c.HandoverCooldown == 0 {
+		c.HandoverCooldown = 10
+	} else if c.HandoverCooldown < 0 {
+		return errors.New("HandoverCooldown must be >= 0")
 	}
 
 	return nil
