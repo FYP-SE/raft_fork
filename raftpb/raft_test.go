@@ -41,7 +41,10 @@ func TestProtoMemorySizes(t *testing.T) {
 	assert.Equal(t, if64Bit(72, 36), unsafe.Sizeof(s), "Snapshot size check")
 
 	var m Message
-	assert.Equal(t, if64Bit(200, 100), unsafe.Sizeof(m), "Message size check")
+	// Message grew by two pointer-sized fields (Stability *uint32, Heir
+	// *uint64) added for HeirRaft in T4.2 (TASKS.md) -- +16 bytes on 64-bit,
+	// +8 on 32-bit.
+	assert.Equal(t, if64Bit(216, 108), unsafe.Sizeof(m), "Message size check")
 
 	var hs HardState
 	assert.Equal(t, if64Bit(64, 32), unsafe.Sizeof(hs), "HardState size check")

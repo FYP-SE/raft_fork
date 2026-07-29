@@ -557,7 +557,15 @@ type Message struct {
 	// responses are populated by a raft node to instruct storage threads on how
 	// to respond and who to respond to when the work associated with a message
 	// is complete. Populated for MsgStorageAppend and MsgStorageApply messages.
-	Responses     []*Message `protobuf:"bytes,14,rep,name=responses" json:"responses,omitempty"`
+	Responses []*Message `protobuf:"bytes,14,rep,name=responses" json:"responses,omitempty"`
+	// stability and heir are HeirRaft (DESIGN.md §2) additions carrying the
+	// sender's stability.Scorer output and its currently-announced heir on
+	// MsgHeartbeat/MsgApp (and their responses, for symmetry). Unset (proto2
+	// default) on all messages when HeirElection/HeirLogPriority are off, so
+	// wire format is byte-identical to stock in that mode. Field numbers 15/16
+	// (not 14) because 14 is already taken by responses above.
+	Stability     *uint32 `protobuf:"varint,15,opt,name=stability" json:"stability,omitempty"`
+	Heir          *uint64 `protobuf:"varint,16,opt,name=heir" json:"heir,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -688,6 +696,20 @@ func (x *Message) GetResponses() []*Message {
 		return x.Responses
 	}
 	return nil
+}
+
+func (x *Message) GetStability() uint32 {
+	if x != nil && x.Stability != nil {
+		return *x.Stability
+	}
+	return 0
+}
+
+func (x *Message) GetHeir() uint64 {
+	if x != nil && x.Heir != nil {
+		return *x.Heir
+	}
+	return 0
 }
 
 type HardState struct {
@@ -1070,7 +1092,7 @@ const file_raft_proto_rawDesc = "" +
 	"\x04term\x18\x03 \x01(\x04R\x04term\"T\n" +
 	"\bSnapshot\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x124\n" +
-	"\bmetadata\x18\x02 \x01(\v2\x18.raftpb.SnapshotMetadataR\bmetadata\"\x9e\x03\n" +
+	"\bmetadata\x18\x02 \x01(\v2\x18.raftpb.SnapshotMetadataR\bmetadata\"\xd0\x03\n" +
 	"\aMessage\x12'\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x13.raftpb.MessageTypeR\x04type\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\x04R\x02to\x12\x12\n" +
@@ -1088,7 +1110,9 @@ const file_raft_proto_rawDesc = "" +
 	"rejectHint\x18\v \x01(\x04R\n" +
 	"rejectHint\x12\x18\n" +
 	"\acontext\x18\f \x01(\fR\acontext\x12-\n" +
-	"\tresponses\x18\x0e \x03(\v2\x0f.raftpb.MessageR\tresponses\"K\n" +
+	"\tresponses\x18\x0e \x03(\v2\x0f.raftpb.MessageR\tresponses\x12\x1c\n" +
+	"\tstability\x18\x0f \x01(\rR\tstability\x12\x12\n" +
+	"\x04heir\x18\x10 \x01(\x04R\x04heir\"K\n" +
 	"\tHardState\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x12\n" +
 	"\x04vote\x18\x02 \x01(\x04R\x04vote\x12\x16\n" +

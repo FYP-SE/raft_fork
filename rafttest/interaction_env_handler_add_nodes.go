@@ -24,6 +24,7 @@ import (
 
 	"go.etcd.io/raft/v3"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/raft/v3/stability"
 )
 
 func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) error {
@@ -71,6 +72,14 @@ func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) e
 				}
 			case "step-down-on-removal":
 				arg.Scan(t, i, &cfg.StepDownOnRemoval)
+			case "stability-score":
+				// T4.3 (TASKS.md): wires a constant stability.Scorer into the
+				// node's Config, so datadriven tests can exercise follower
+				// score reporting without a real EWMAScorer. Scanned as int
+				// (datadriven's arg.Scan doesn't support uint8) and narrowed.
+				var score int
+				arg.Scan(t, i, &score)
+				cfg.StabilityScorer = stability.ConstScorer(uint8(score))
 			}
 		}
 	}

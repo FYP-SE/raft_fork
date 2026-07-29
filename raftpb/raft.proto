@@ -96,6 +96,14 @@ message Message {
 	// to respond and who to respond to when the work associated with a message
 	// is complete. Populated for MsgStorageAppend and MsgStorageApply messages.
 	repeated Message     responses   = 14;
+	// stability and heir are HeirRaft (DESIGN.md §2) additions carrying the
+	// sender's stability.Scorer output and its currently-announced heir on
+	// MsgHeartbeat/MsgApp (and their responses, for symmetry). Unset (proto2
+	// default) on all messages when HeirElection/HeirLogPriority are off, so
+	// wire format is byte-identical to stock in that mode. Field numbers 15/16
+	// (not 14) because 14 is already taken by responses above.
+	optional uint32      stability   = 15;
+	optional uint64      heir        = 16;
 }
 
 message HardState {

@@ -555,6 +555,11 @@ type raft struct {
 	pendingReadIndexMessages []*pb.Message
 
 	traceLogger TraceLogger
+
+	// stabilityScorer is Config.StabilityScorer. nil unless HeirRaft is in
+	// use (DESIGN.md §2.1) -- follower response construction must check this
+	// for nil rather than assuming any HeirRaft flag implies it's set.
+	stabilityScorer stability.Scorer
 }
 
 func newRaft(c *Config) *raft {
@@ -585,6 +590,7 @@ func newRaft(c *Config) *raft {
 		disableConfChangeValidation: c.DisableConfChangeValidation,
 		stepDownOnRemoval:           c.StepDownOnRemoval,
 		traceLogger:                 c.TraceLogger,
+		stabilityScorer:             c.StabilityScorer,
 	}
 
 	traceInitState(r)
@@ -1507,6 +1513,10 @@ func stepLeader(r *raft, m *pb.Message) error {
 		// an MsgAppResp to acknowledge the appended entries in the last Ready.
 
 		pr.RecentActive = true
+		if m.Stability != nil {
+			pr.StabilityScore = uint8(m.GetStability())
+			pr.ScoreReported = true
+		}
 
 		if m.GetReject() {
 			// RejectHint is the suggested next base entry for appending (i.e.
@@ -1700,6 +1710,10 @@ func stepLeader(r *raft, m *pb.Message) error {
 	case pb.MsgHeartbeatResp:
 		pr.RecentActive = true
 		pr.MsgAppFlowPaused = false
+		if m.Stability != nil {
+			pr.StabilityScore = uint8(m.GetStability())
+			pr.ScoreReported = true
+		}
 
 		// NB: if the follower is paused (full Inflights), this will still send an
 		// empty append, allowing it to recover from situations in which all the
@@ -1909,17 +1923,28 @@ func logSliceFromMsgApp(m *pb.Message) logSlice {
 	}
 }
 
+// stabilityStamp returns the current stability score to attach to an
+// outgoing MsgAppResp/MsgHeartbeatResp, or nil if no StabilityScorer is
+// configured. nil (rather than a zero score) keeps the message wire-identical
+// to stock when HeirRaft is off (T4.2's disabled-mode guarantee).
+func (r *raft) stabilityStamp() *uint32 {
+	if r.stabilityScorer == nil {
+		return nil
+	}
+	return new(uint32(r.stabilityScorer.Score()))
+}
+
 func (r *raft) handleAppendEntries(m *pb.Message) {
 	// TODO(pav-kv): construct logSlice up the stack next to receiving the
 	// message, and validate it before taking any action (e.g. bumping term).
 	a := logSliceFromMsgApp(m)
 
 	if a.prev.index < r.raftLog.committed {
-		r.send(&pb.Message{To: m.From, Type: pb.MsgAppResp.Enum(), Index: new(r.raftLog.committed)})
+		r.send(&pb.Message{To: m.From, Type: pb.MsgAppResp.Enum(), Index: new(r.raftLog.committed), Stability: r.stabilityStamp()})
 		return
 	}
 	if mlastIndex, ok := r.raftLog.maybeAppend(a, m.GetCommit()); ok {
-		r.send(&pb.Message{To: m.From, Type: pb.MsgAppResp.Enum(), Index: new(mlastIndex)})
+		r.send(&pb.Message{To: m.From, Type: pb.MsgAppResp.Enum(), Index: new(mlastIndex), Stability: r.stabilityStamp()})
 		return
 	}
 	r.logger.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
@@ -1950,12 +1975,13 @@ func (r *raft) handleAppendEntries(m *pb.Message) {
 		Reject:     new(true),
 		RejectHint: new(hintIndex),
 		LogTerm:    new(hintTerm),
+		Stability:  r.stabilityStamp(),
 	})
 }
 
 func (r *raft) handleHeartbeat(m *pb.Message) {
 	r.raftLog.commitTo(m.GetCommit())
-	r.send(&pb.Message{To: m.From, Type: pb.MsgHeartbeatResp.Enum(), Context: m.GetContext()})
+	r.send(&pb.Message{To: m.From, Type: pb.MsgHeartbeatResp.Enum(), Context: m.GetContext(), Stability: r.stabilityStamp()})
 }
 
 func (r *raft) handleSnapshot(m *pb.Message) {

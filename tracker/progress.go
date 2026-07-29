@@ -114,6 +114,19 @@ type Progress struct {
 
 	// IsLearner is true if this progress is tracked for a learner.
 	IsLearner bool
+
+	// StabilityScore is the most recent stability.Scorer.Score() value this
+	// follower attached to a MsgAppResp/MsgHeartbeatResp, if any (HeirRaft,
+	// DESIGN.md §2.2). Meaningless when ScoreReported is false. Reset to its
+	// zero value on term change along with the rest of Progress (see
+	// (*raft).reset), so a score never survives past the term it was
+	// reported in.
+	StabilityScore uint8
+	// ScoreReported is true once this follower has attached a score at least
+	// once in the current term. DESIGN.md §2.3's heir eligibility gate
+	// requires this (a follower that has never reported is never a heir
+	// candidate, even with the zero-value StabilityScore).
+	ScoreReported bool
 }
 
 // ResetState moves the Progress into the specified State, resetting MsgAppFlowPaused,
@@ -286,6 +299,9 @@ func (pr *Progress) String() string {
 	}
 	if !pr.RecentActive {
 		fmt.Fprint(&buf, " inactive")
+	}
+	if pr.ScoreReported {
+		fmt.Fprintf(&buf, " score=%d", pr.StabilityScore)
 	}
 	if n := pr.Inflights.Count(); n > 0 {
 		fmt.Fprintf(&buf, " inflight=%d", n)
