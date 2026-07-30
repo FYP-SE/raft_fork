@@ -618,6 +618,12 @@ type raft struct {
 	// ping-pong). Both are leader-only soft state, cleared in (*raft).reset.
 	degradeTicks              int
 	handoverCooldownRemaining int
+
+	// heirLogPriority mirrors Config.HeirLogPriority (DESIGN.md §2.7):
+	// bcastAppend sends to the heir first when set, narrowing its expected
+	// log lag at crash time. Dispatch ordering only -- commit rule, quorum
+	// semantics and acknowledgement handling are untouched.
+	heirLogPriority bool
 }
 
 func newRaft(c *Config) *raft {
@@ -660,6 +666,7 @@ func newRaft(c *Config) *raft {
 		handoverThreshold:           c.HandoverThreshold,
 		degradeWindow:               c.DegradeWindow,
 		handoverCooldown:            c.HandoverCooldown,
+		heirLogPriority:             c.HeirLogPriority,
 	}
 
 	traceInitState(r)
@@ -910,8 +917,21 @@ func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 // bcastAppend sends RPC, with entries to all peers that are not up-to-date
 // according to the progress recorded in r.trk.
 func (r *raft) bcastAppend() {
+	// DESIGN.md §2.7: when HeirLogPriority is set, send to the heir first --
+	// dispatch ordering only, so this narrows the heir's expected log lag at
+	// crash time without touching commit rule, quorum semantics, or
+	// acknowledgement handling. Zero effect when unset or no heir is
+	// selected (CLAUDE.md constraint 4: byte-identical to stock).
+	if r.heirLogPriority && r.heir != None {
+		if _, ok := r.trk.Progress[r.heir]; ok {
+			r.sendAppend(r.heir)
+		}
+	}
 	r.trk.Visit(func(id uint64, _ *tracker.Progress) {
 		if id == r.id {
+			return
+		}
+		if r.heirLogPriority && id == r.heir {
 			return
 		}
 		r.sendAppend(id)

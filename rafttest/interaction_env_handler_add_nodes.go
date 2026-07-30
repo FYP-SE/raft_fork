@@ -94,6 +94,10 @@ func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) e
 				cfg.HysteresisMargin = uint8(margin)
 			case "min-heir-tenure":
 				arg.Scan(t, i, &cfg.MinHeirTenure)
+			case "heir-log-priority":
+				// T4.7 (TASKS.md): send to the heir first in bcastAppend
+				// (DESIGN.md §2.7).
+				arg.Scan(t, i, &cfg.HeirLogPriority)
 			case "mutable-stability-score":
 				// T4.6 (TASKS.md): like stability-score, but backed by a
 				// *stability.Var instead of a ConstScorer, so a later

@@ -43,7 +43,7 @@ func (env *InteractionEnv) Handle(t *testing.T, d datadriven.TestData) string {
 	case "add-nodes":
 		// Example:
 		//
-		// add-nodes <number-of-nodes-to-add> voters=(1 2 3) learners=(4 5) index=2 content=foo async-storage-writes=true stability-score=200 heir-election=true max-heir-lag=256 hysteresis-margin=20 min-heir-tenure=10 mutable-stability-score=200 graceful-handover=true handover-threshold=64 degrade-window=5 handover-cooldown=10
+		// add-nodes <number-of-nodes-to-add> voters=(1 2 3) learners=(4 5) index=2 content=foo async-storage-writes=true stability-score=200 heir-election=true max-heir-lag=256 hysteresis-margin=20 min-heir-tenure=10 mutable-stability-score=200 graceful-handover=true handover-threshold=64 degrade-window=5 handover-cooldown=10 heir-log-priority=true
 		err = env.handleAddNodes(t, d)
 	case "campaign":
 		// Example:
