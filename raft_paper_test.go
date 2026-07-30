@@ -579,6 +579,11 @@ func TestFollowerCheckMsgApp(t *testing.T) {
 			expected.RejectHint = new(tt.wrejectHint)
 			expected.LogTerm = new(tt.wlogterm)
 		}
+		// T4.3 (TASKS.md): under RAFT_HEIRRAFT_FORCE_ON (heir_conformance_test.go)
+		// the follower legitimately attaches Stability to MsgAppResp; this
+		// test's concern is the paper-conformance fields above, not that
+		// piggybacked addition, so mirror whatever the real response carries.
+		expected.Stability = r.stabilityStamp()
 		assert.Equal(t, []*pb.Message{expected}, r.readMessages(), "#%d", i)
 	}
 }

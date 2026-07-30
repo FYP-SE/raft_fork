@@ -4208,7 +4208,7 @@ func SetRandomizedElectionTimeout(r *RawNode, v int) {
 }
 
 func newTestConfig(id uint64, election, heartbeat int, storage Storage) *Config {
-	return &Config{
+	cfg := &Config{
 		ID:              id,
 		ElectionTick:    election,
 		HeartbeatTick:   heartbeat,
@@ -4216,6 +4216,8 @@ func newTestConfig(id uint64, election, heartbeat int, storage Storage) *Config 
 		MaxSizePerMsg:   noLimit,
 		MaxInflightMsgs: 256,
 	}
+	maybeForceHeirRaftOn(cfg)
+	return cfg
 }
 
 type testMemoryStorageOptions func(*MemoryStorage)

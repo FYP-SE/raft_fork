@@ -12,7 +12,18 @@ import (
 // byte-identical to stock.
 
 func TestConfig_HeirRaftFieldsDefaultOff(t *testing.T) {
-	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1)))
+	// Deliberately not newTestConfig: this test asserts Config's own
+	// zero-value defaults (CLAUDE.md constraint 4), which must hold
+	// regardless of the T4.8 RAFT_HEIRRAFT_FORCE_ON test wrapper that
+	// newTestConfig applies (heir_conformance_test.go).
+	cfg := &Config{
+		ID:              1,
+		ElectionTick:    10,
+		HeartbeatTick:   1,
+		Storage:         newTestMemoryStorage(withPeers(1)),
+		MaxSizePerMsg:   noLimit,
+		MaxInflightMsgs: 256,
+	}
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("validate() on a config with all HeirRaft fields unset: %v", err)
 	}
@@ -74,6 +85,10 @@ func TestConfig_ValidateRejectsFlagWithoutScorer(t *testing.T) {
 	for _, name := range []string{"HeirElection", "HeirLogPriority", "GracefulHandover"} {
 		t.Run(name, func(t *testing.T) {
 			cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1)))
+			// Explicit, not just relying on newTestConfig's default: this
+			// test's premise is "flag true, scorer absent," which must hold
+			// regardless of RAFT_HEIRRAFT_FORCE_ON (heir_conformance_test.go).
+			cfg.StabilityScorer = nil
 			switch name {
 			case "HeirElection":
 				cfg.HeirElection = true

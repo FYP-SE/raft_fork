@@ -142,8 +142,15 @@ func TestResetRandomizedElectionTimeout_StaleAnnouncementIsVanilla(t *testing.T)
 
 func TestResetRandomizedElectionTimeout_DisabledIsVanilla(t *testing.T) {
 	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
-	r := newRaft(cfg) // HeirElection left false, StabilityScorer nil
-	r.knownHeir = 2    // even if soft state somehow got set, disabled must win
+	// Explicit, not just left at newTestConfig's default: this test's premise
+	// is HeirElection=false, which must hold regardless of
+	// RAFT_HEIRRAFT_FORCE_ON (heir_conformance_test.go).
+	cfg.HeirElection = false
+	cfg.HeirLogPriority = false
+	cfg.GracefulHandover = false
+	cfg.StabilityScorer = nil
+	r := newRaft(cfg)
+	r.knownHeir = 2 // even if soft state somehow got set, disabled must win
 	assertVanillaDistribution(t, r)
 }
 

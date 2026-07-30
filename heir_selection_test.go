@@ -224,8 +224,13 @@ func TestSelectHeir_NoEligibleFollowerClearsHeir(t *testing.T) {
 
 func TestSelectHeir_DisabledIsNoOp(t *testing.T) {
 	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
-	// HeirElection left false (and StabilityScorer nil): DESIGN.md/CLAUDE.md
-	// constraint 4, behaviour must be a no-op.
+	// Explicit, not just left at newTestConfig's default: DESIGN.md/CLAUDE.md
+	// constraint 4, behaviour must be a no-op, regardless of
+	// RAFT_HEIRRAFT_FORCE_ON (heir_conformance_test.go).
+	cfg.HeirElection = false
+	cfg.HeirLogPriority = false
+	cfg.GracefulHandover = false
+	cfg.StabilityScorer = nil
 	r := newRaft(cfg)
 	r.becomeCandidate()
 	r.becomeLeader()

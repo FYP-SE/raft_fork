@@ -154,7 +154,10 @@ func TestMaybeGracefulHandover_DisabledIsNoOp(t *testing.T) {
 	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
 	cfg.StabilityScorer = v
 	cfg.HeirElection = true
-	// GracefulHandover left false.
+	// Explicit, not just left at newTestConfig's default: this test's premise
+	// is GracefulHandover=false, which must hold regardless of
+	// RAFT_HEIRRAFT_FORCE_ON (heir_conformance_test.go).
+	cfg.GracefulHandover = false
 	r := newRaft(cfg)
 	r.becomeCandidate()
 	r.becomeLeader()
