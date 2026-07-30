@@ -94,6 +94,25 @@ func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) e
 				cfg.HysteresisMargin = uint8(margin)
 			case "min-heir-tenure":
 				arg.Scan(t, i, &cfg.MinHeirTenure)
+			case "mutable-stability-score":
+				// T4.6 (TASKS.md): like stability-score, but backed by a
+				// *stability.Var instead of a ConstScorer, so a later
+				// set-stability-score command can change it -- needed to
+				// simulate a leader degrading over time for graceful
+				// handover tests.
+				var score int
+				arg.Scan(t, i, &score)
+				cfg.StabilityScorer = stability.NewVar(uint8(score))
+			case "graceful-handover":
+				arg.Scan(t, i, &cfg.GracefulHandover)
+			case "handover-threshold":
+				var threshold int
+				arg.Scan(t, i, &threshold)
+				cfg.HandoverThreshold = uint8(threshold)
+			case "degrade-window":
+				arg.Scan(t, i, &cfg.DegradeWindow)
+			case "handover-cooldown":
+				arg.Scan(t, i, &cfg.HandoverCooldown)
 			}
 		}
 	}

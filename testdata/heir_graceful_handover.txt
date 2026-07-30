@@ -1,0 +1,469 @@
+# T4.6 (TASKS.md) -- graceful handover (DESIGN.md §2.6). A leader whose own
+# stability score stays below HandoverThreshold for DegradeWindow
+# consecutive heartbeat intervals proactively transfers leadership to its
+# heir, reusing the existing MsgTransferLeader/MsgTimeoutNow path verbatim.
+# Written first per the TDD convention, before maybeGracefulHandover landed
+# in raft.go.
+#
+# Cooldown-prevents-ping-pong is verified precisely and deterministically in
+# the unit test TestMaybeGracefulHandover_CooldownPreventsRetrigger (raft
+# package) instead of here: reproducing an aborted/timed-out transfer in the
+# interaction harness (to get the leader back so it could try to
+# re-trigger) would need a second, independent mechanism (holding the heir
+# back from catching up) that doesn't otherwise belong in this test, for a
+# property the unit test already pins exactly.
+
+log-level error
+----
+ok
+
+# Cluster A: the happy path. id 1 leads, starts out healthy (mutable score),
+# then degrades; id 2 is the heir (high, fixed score, comfortably above
+# HandoverThreshold=64 + HysteresisMargin=20); id 3 is an ordinary follower.
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true graceful-handover=true degrade-window=2 mutable-stability-score=200
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=255
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=100
+----
+ok
+
+campaign 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  1->2 MsgVote Term:1 Log:1/2
+  1->3 MsgVote Term:1 Log:1/2
+> 2 receiving messages
+  1->2 MsgVote Term:1 Log:1/2
+> 3 receiving messages
+  1->3 MsgVote Term:1 Log:1/2
+> 2 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  2->1 MsgVoteResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  3->1 MsgVoteResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgVoteResp Term:1 Log:0/0
+  3->1 MsgVoteResp Term:1 Log:0/0
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateLeader
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+
+# First heartbeat tick runs selection (id 2 wins on score) and announces it;
+# leader 1's own score is still healthy (200), so no degradation is counted.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=255
+3: StateReplicate match=3 next=4 score=100
+heir=2 churn=0
+
+# Leader 1 degrades below HandoverThreshold=64.
+set-stability-score 1 score=30
+----
+ok
+
+# First degraded tick: degradeTicks 0->1, below degrade-window=2, no transfer.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+raft-state
+----
+1: StateLeader (Voter) Term:1 Lead:1
+2: StateFollower (Voter) Term:1 Lead:1
+3: StateFollower (Voter) Term:1 Lead:1
+
+# Second consecutive degraded tick: degradeTicks reaches degrade-window=2 --
+# 1 proactively transfers to its heir (2), which already has an up-to-date
+# log, so this is an immediate MsgTimeoutNow (T4.6 accept criterion: observe
+# MsgTimeoutNow to the heir).
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgTimeoutNow Term:1 Log:0/0
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgTimeoutNow Term:1 Log:0/0
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:2 Vote:2 Commit:3
+  Messages:
+  2->1 MsgVote Term:2 Log:1/3
+  2->3 MsgVote Term:2 Log:1/3
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgVote Term:2 Log:1/3
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 receiving messages
+  2->3 MsgVote Term:2 Log:1/3
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:2 Vote:2 Commit:3
+  Messages:
+  1->2 MsgVoteResp Term:2 Log:0/0
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:2 Vote:2 Commit:3
+  Messages:
+  3->2 MsgVoteResp Term:2 Log:0/0
+> 2 receiving messages
+  1->2 MsgVoteResp Term:2 Log:0/0
+  3->2 MsgVoteResp Term:2 Log:0/0
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:2 State:StateLeader
+  Entries:
+  2/4 EntryNormal ""
+  Messages:
+  2->1 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+  2->3 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+> 1 receiving messages
+  2->1 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+> 3 receiving messages
+  2->3 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:2 State:StateFollower
+  Entries:
+  2/4 EntryNormal ""
+  Messages:
+  1->2 MsgAppResp Term:2 Log:0/4
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:2 State:StateFollower
+  Entries:
+  2/4 EntryNormal ""
+  Messages:
+  3->2 MsgAppResp Term:2 Log:0/4
+> 2 receiving messages
+  1->2 MsgAppResp Term:2 Log:0/4
+  3->2 MsgAppResp Term:2 Log:0/4
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:2 Commit:4
+  CommittedEntries:
+  2/4 EntryNormal ""
+  Messages:
+  2->1 MsgApp Term:2 Log:2/4 Commit:4
+  2->3 MsgApp Term:2 Log:2/4 Commit:4
+> 1 receiving messages
+  2->1 MsgApp Term:2 Log:2/4 Commit:4
+> 3 receiving messages
+  2->3 MsgApp Term:2 Log:2/4 Commit:4
+> 1 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:2 Commit:4
+  CommittedEntries:
+  2/4 EntryNormal ""
+  Messages:
+  1->2 MsgAppResp Term:2 Log:0/4
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:2 Commit:4
+  CommittedEntries:
+  2/4 EntryNormal ""
+  Messages:
+  3->2 MsgAppResp Term:2 Log:0/4
+> 2 receiving messages
+  1->2 MsgAppResp Term:2 Log:0/4
+  3->2 MsgAppResp Term:2 Log:0/4
+
+# Heir leads next term (T4.6 accept criterion), reusing the existing
+# transfer path -- MsgTimeoutNow made 2 campaign immediately, bypassing
+# PreVote (campaignTransfer), so this is a single-round transfer of power.
+raft-state
+----
+1: StateFollower (Voter) Term:2 Lead:2
+2: StateLeader (Voter) Term:2 Lead:2
+3: StateFollower (Voter) Term:2 Lead:2
+
+# Cluster B: no eligible heir. GracefulHandover on, but HeirElection off, so
+# no heir is ever selected (r.heir stays None) -- sustained degradation must
+# never produce a transfer (T4.6 accept criterion).
+add-nodes 1 voters=(4,5,6) index=2 graceful-handover=true degrade-window=1 mutable-stability-score=30
+----
+ok
+
+add-nodes 1 voters=(4,5,6) index=2
+----
+ok
+
+add-nodes 1 voters=(4,5,6) index=2
+----
+ok
+
+campaign 4
+----
+ok
+
+stabilize
+----
+> 4 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:1 Vote:4 Commit:2
+  Messages:
+  4->5 MsgVote Term:1 Log:1/2
+  4->6 MsgVote Term:1 Log:1/2
+> 5 receiving messages
+  4->5 MsgVote Term:1 Log:1/2
+> 6 receiving messages
+  4->6 MsgVote Term:1 Log:1/2
+> 5 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:4 Commit:2
+  Messages:
+  5->4 MsgVoteResp Term:1 Log:0/0
+> 6 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:4 Commit:2
+  Messages:
+  6->4 MsgVoteResp Term:1 Log:0/0
+> 4 receiving messages
+  5->4 MsgVoteResp Term:1 Log:0/0
+  6->4 MsgVoteResp Term:1 Log:0/0
+> 4 handling Ready
+  Ready MustSync=true:
+  Lead:4 State:StateLeader
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  4->5 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+  4->6 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 5 receiving messages
+  4->5 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 6 receiving messages
+  4->6 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 5 handling Ready
+  Ready MustSync=true:
+  Lead:4 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  5->4 MsgAppResp Term:1 Log:0/3
+> 6 handling Ready
+  Ready MustSync=true:
+  Lead:4 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  6->4 MsgAppResp Term:1 Log:0/3
+> 4 receiving messages
+  5->4 MsgAppResp Term:1 Log:0/3
+  6->4 MsgAppResp Term:1 Log:0/3
+> 4 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:4 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  4->5 MsgApp Term:1 Log:1/3 Commit:3
+  4->6 MsgApp Term:1 Log:1/3 Commit:3
+> 5 receiving messages
+  4->5 MsgApp Term:1 Log:1/3 Commit:3
+> 6 receiving messages
+  4->6 MsgApp Term:1 Log:1/3 Commit:3
+> 5 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:4 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  5->4 MsgAppResp Term:1 Log:0/3
+> 6 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:4 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  6->4 MsgAppResp Term:1 Log:0/3
+> 4 receiving messages
+  5->4 MsgAppResp Term:1 Log:0/3
+  6->4 MsgAppResp Term:1 Log:0/3
+
+tick-heartbeat 4
+----
+ok
+
+tick-heartbeat 4
+----
+ok
+
+stabilize
+----
+> 4 handling Ready
+  Ready MustSync=false:
+  Messages:
+  4->5 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  4->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  4->5 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  4->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 5 receiving messages
+  4->5 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  4->5 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 6 receiving messages
+  4->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  4->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 5 handling Ready
+  Ready MustSync=false:
+  Messages:
+  5->4 MsgHeartbeatResp Term:1 Log:0/0
+  5->4 MsgHeartbeatResp Term:1 Log:0/0
+> 6 handling Ready
+  Ready MustSync=false:
+  Messages:
+  6->4 MsgHeartbeatResp Term:1 Log:0/0
+  6->4 MsgHeartbeatResp Term:1 Log:0/0
+> 4 receiving messages
+  5->4 MsgHeartbeatResp Term:1 Log:0/0
+  5->4 MsgHeartbeatResp Term:1 Log:0/0
+  6->4 MsgHeartbeatResp Term:1 Log:0/0
+  6->4 MsgHeartbeatResp Term:1 Log:0/0
+
+raft-state
+----
+1: StateFollower (Voter) Term:2 Lead:2
+2: StateLeader (Voter) Term:2 Lead:2
+3: StateFollower (Voter) Term:2 Lead:2
+4: StateLeader (Voter) Term:1 Lead:4
+5: StateFollower (Voter) Term:1 Lead:4
+6: StateFollower (Voter) Term:1 Lead:4

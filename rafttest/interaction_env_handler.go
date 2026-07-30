@@ -43,7 +43,7 @@ func (env *InteractionEnv) Handle(t *testing.T, d datadriven.TestData) string {
 	case "add-nodes":
 		// Example:
 		//
-		// add-nodes <number-of-nodes-to-add> voters=(1 2 3) learners=(4 5) index=2 content=foo async-storage-writes=true stability-score=200 heir-election=true max-heir-lag=256 hysteresis-margin=20 min-heir-tenure=10
+		// add-nodes <number-of-nodes-to-add> voters=(1 2 3) learners=(4 5) index=2 content=foo async-storage-writes=true stability-score=200 heir-election=true max-heir-lag=256 hysteresis-margin=20 min-heir-tenure=10 mutable-stability-score=200 graceful-handover=true handover-threshold=64 degrade-window=5 handover-cooldown=10
 		err = env.handleAddNodes(t, d)
 	case "campaign":
 		// Example:
@@ -105,6 +105,15 @@ func (env *InteractionEnv) Handle(t *testing.T, d datadriven.TestData) string {
 		//
 		// set-randomized-election-timeout 1 timeout=5
 		err = env.handleSetRandomizedElectionTimeout(t, d)
+	case "set-stability-score":
+		// Change a node's stability score at runtime (only works for a node
+		// added with mutable-stability-score=N). Used to simulate a leader
+		// degrading (or recovering) over time.
+		//
+		// Example:
+		//
+		// set-stability-score 1 score=30
+		err = env.handleSetStabilityScore(t, d)
 	case "stabilize":
 		// Deliver messages to and run process-ready on the set of IDs until
 		// no more work is to be done. If no ids are given, all nodes are used.

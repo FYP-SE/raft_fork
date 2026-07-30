@@ -574,6 +574,11 @@ type raft struct {
 	// follower-side bound, in heartbeat intervals, after which a stale heir
 	// announcement is no longer trusted (see currentHeir).
 	heirStaleness int
+	// heirJitter and nonHeirBackoff mirror Config.HeirJitter/NonHeirBackoff
+	// (DESIGN.md §2.5, §5): the three-way randomizedElectionTimeout rule in
+	// resetRandomizedElectionTimeout consumes these directly.
+	heirJitter     float64
+	nonHeirBackoff float64
 
 	// heir is this leader's currently designated successor (DESIGN.md §2.3).
 	// None when no eligible follower exists. Soft state: cleared in
@@ -594,6 +599,25 @@ type raft struct {
 	// on term change. See currentHeir for the staleness-aware read.
 	knownHeir    uint64
 	heirSeenTick int
+
+	// gracefulHandover, handoverThreshold, degradeWindow and handoverCooldown
+	// mirror the matching Config fields (DESIGN.md §2.6/§5). gracefulHandover
+	// gates whether maybeGracefulHandover does anything at all.
+	gracefulHandover  bool
+	handoverThreshold uint8
+	degradeWindow     int
+	handoverCooldown  int
+
+	// degradeTicks counts consecutive heartbeat intervals this leader's own
+	// stability score has stayed below handoverThreshold (DESIGN.md §2.6
+	// anti-flap: a handover is only considered once this reaches
+	// degradeWindow). handoverCooldownRemaining is the number of ticks left
+	// before another voluntary handover may be triggered, set to
+	// handoverCooldown*electionTimeout each time one fires (DESIGN.md §2.6:
+	// "at most one voluntary handover per handoverCooldown", preventing
+	// ping-pong). Both are leader-only soft state, cleared in (*raft).reset.
+	degradeTicks              int
+	handoverCooldownRemaining int
 }
 
 func newRaft(c *Config) *raft {
@@ -630,6 +654,12 @@ func newRaft(c *Config) *raft {
 		hysteresisMargin:            c.HysteresisMargin,
 		minHeirTenure:               c.MinHeirTenure,
 		heirStaleness:               c.HeirStaleness,
+		heirJitter:                  c.HeirJitter,
+		nonHeirBackoff:              c.NonHeirBackoff,
+		gracefulHandover:            c.GracefulHandover,
+		handoverThreshold:           c.HandoverThreshold,
+		degradeWindow:               c.DegradeWindow,
+		handoverCooldown:            c.HandoverCooldown,
 	}
 
 	traceInitState(r)
@@ -984,6 +1014,8 @@ func (r *raft) reset(term uint64) {
 	r.heirTenure = 0
 	r.knownHeir = None
 	r.heirSeenTick = 0
+	r.degradeTicks = 0
+	r.handoverCooldownRemaining = 0
 }
 
 func (r *raft) appendEntry(es ...*pb.Entry) (accepted bool) {
@@ -1065,6 +1097,9 @@ func (r *raft) tickHeartbeat() {
 		// invoked ad hoc for ReadOnlySafe read-index rounds, which would
 		// otherwise skew heirTenure's once-per-interval counting.
 		r.selectHeir()
+		// Self-degradation check (DESIGN.md §2.6), run right after selection
+		// so it sees this interval's freshly-chosen heir.
+		r.maybeGracefulHandover()
 		if err := r.Step(&pb.Message{From: new(r.id), Type: pb.MsgBeat.Enum()}); err != nil {
 			r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
 		}
@@ -1921,11 +1956,25 @@ func stepFollower(r *raft, m *pb.Message) error {
 	case pb.MsgApp:
 		r.electionElapsed = 0
 		r.lead = m.GetFrom()
-		r.handleAppendEntries(m)
+		r.handleAppendEntries(m) // also updates knownHeir via recordHeir
+		// A stable follower's randomizedElectionTimeout is otherwise never
+		// recomputed after the initial becomeFollower call (vanilla Raft:
+		// electionElapsed is simply reset against the same fixed target
+		// every heartbeat). HeirRaft needs the bias to react to the
+		// follower's current heir belief, which can only have just changed
+		// via the recordHeir call above -- so recompute it here, but only
+		// when HeirElection is on, to keep vanilla/disabled behaviour
+		// byte-identical (DESIGN.md §2.5, CLAUDE.md constraint 4).
+		if r.heirElection {
+			r.resetRandomizedElectionTimeout()
+		}
 	case pb.MsgHeartbeat:
 		r.electionElapsed = 0
 		r.lead = m.GetFrom()
-		r.handleHeartbeat(m)
+		r.handleHeartbeat(m) // also updates knownHeir via recordHeir
+		if r.heirElection {
+			r.resetRandomizedElectionTimeout()
+		}
 	case pb.MsgSnap:
 		r.electionElapsed = 0
 		r.lead = m.GetFrom()
@@ -2087,6 +2136,55 @@ func (r *raft) changeHeir(id uint64) {
 	}
 	r.heir = id
 	r.heirTenure = 0
+}
+
+// maybeGracefulHandover triggers a proactive leadership transfer to the
+// heir once this leader's own stability score has stayed below
+// HandoverThreshold for DegradeWindow consecutive heartbeat intervals, an
+// eligible heir exists with a comfortable score margin, no transfer is
+// already in flight, and the cooldown from any previous voluntary handover
+// has elapsed (DESIGN.md §2.6). It reuses the existing MsgTransferLeader
+// step path verbatim via r.Step -- the same path the public
+// TransferLeadership API drives -- rather than duplicating any of that
+// logic (existing abort-on-timeout handling in tickHeartbeat therefore
+// applies unchanged if this handover doesn't complete in time).
+//
+// The "threshold + margin" eligibility bar reuses HysteresisMargin (DESIGN.md
+// §5): there's no separate handover-specific margin tunable, and the
+// intent is the same one HysteresisMargin already serves for heir
+// selection -- don't act on a candidate that only barely clears the bar.
+func (r *raft) maybeGracefulHandover() {
+	if !r.gracefulHandover {
+		return
+	}
+	if r.handoverCooldownRemaining > 0 {
+		r.handoverCooldownRemaining--
+	}
+
+	if r.stabilityScorer.Score() >= r.handoverThreshold {
+		r.degradeTicks = 0
+		return
+	}
+	r.degradeTicks++
+	if r.degradeTicks < r.degradeWindow {
+		return
+	}
+	if r.handoverCooldownRemaining > 0 || r.leadTransferee != None {
+		return
+	}
+
+	heirPr := r.trk.Progress[r.heir]
+	lastIndex := r.raftLog.lastIndex()
+	if r.heir == None || heirPr == nil ||
+		!r.heirEligible(r.heir, heirPr, lastIndex, r.trk.Config.Voters.IDs()) ||
+		int(heirPr.StabilityScore) < int(r.handoverThreshold)+int(r.hysteresisMargin) {
+		return
+	}
+
+	r.handoverCooldownRemaining = r.handoverCooldown * r.electionTimeout
+	if err := r.Step(&pb.Message{From: new(r.heir), Type: pb.MsgTransferLeader.Enum()}); err != nil {
+		r.logger.Warningf("%x graceful handover to %x failed: %v", r.id, r.heir, err)
+	}
 }
 
 // recordHeir updates follower-side soft state from an incoming
@@ -2379,7 +2477,36 @@ func (r *raft) pastElectionTimeout() bool {
 	return r.electionElapsed >= r.randomizedElectionTimeout
 }
 
+// resetRandomizedElectionTimeout draws this node's next randomized election
+// timeout. Vanilla Raft always draws uniformly from
+// [electionTimeout, 2*electionTimeout). HeirRaft (DESIGN.md §2.5) biases the
+// draw by this node's belief about the live heir, read via currentHeir
+// (which is itself staleness-aware, so a heir hint older than HeirStaleness
+// heartbeat intervals falls through to the vanilla case below):
+//
+//   - This node believes it is the heir: fires first, almost deterministically
+//     (electionTimeout + a small jitter).
+//   - This node knows of a different live heir: deliberately waits longer,
+//     so the heir gets to campaign uncontested.
+//   - No heir known, or HeirElection is off: exactly vanilla Raft, so
+//     behaviour is byte-identical when HeirRaft is disabled (CLAUDE.md
+//     constraint 4).
 func (r *raft) resetRandomizedElectionTimeout() {
+	if r.heirElection {
+		switch heir := r.currentHeir(); {
+		case heir == r.id:
+			delta := int(r.heirJitter * float64(r.electionTimeout))
+			if delta < 1 {
+				delta = 1
+			}
+			r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(delta)
+			return
+		case heir != None:
+			backoff := int(r.nonHeirBackoff * float64(r.electionTimeout))
+			r.randomizedElectionTimeout = backoff + globalRand.Intn(r.electionTimeout)
+			return
+		}
+	}
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
 }
 
