@@ -80,6 +80,20 @@ func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) e
 				var score int
 				arg.Scan(t, i, &score)
 				cfg.StabilityScorer = stability.ConstScorer(uint8(score))
+			case "heir-election":
+				// T4.4 (TASKS.md): enables leader-side heir selection +
+				// announcement (DESIGN.md §2.3/§2.4).
+				arg.Scan(t, i, &cfg.HeirElection)
+			case "max-heir-lag":
+				arg.Scan(t, i, &cfg.MaxHeirLag)
+			case "hysteresis-margin":
+				// Scanned as int for the same reason as stability-score above
+				// (arg.Scan doesn't support uint8).
+				var margin int
+				arg.Scan(t, i, &margin)
+				cfg.HysteresisMargin = uint8(margin)
+			case "min-heir-tenure":
+				arg.Scan(t, i, &cfg.MinHeirTenure)
 			}
 		}
 	}

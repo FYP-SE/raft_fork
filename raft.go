@@ -560,6 +560,40 @@ type raft struct {
 	// use (DESIGN.md §2.1) -- follower response construction must check this
 	// for nil rather than assuming any HeirRaft flag implies it's set.
 	stabilityScorer stability.Scorer
+
+	// heirElection, maxHeirLag, hysteresisMargin and minHeirTenure mirror the
+	// matching Config fields (DESIGN.md §2.3/§5). heirElection gates whether
+	// selectHeir does anything at all; false (the default) makes it a no-op,
+	// so r.heir/r.knownHeir stay None forever and the wire format is
+	// byte-identical to stock (CLAUDE.md constraint 4).
+	heirElection     bool
+	maxHeirLag       uint64
+	hysteresisMargin uint8
+	minHeirTenure    int
+	// heirStaleness mirrors Config.HeirStaleness (DESIGN.md §2.4/§2.5):
+	// follower-side bound, in heartbeat intervals, after which a stale heir
+	// announcement is no longer trusted (see currentHeir).
+	heirStaleness int
+
+	// heir is this leader's currently designated successor (DESIGN.md §2.3).
+	// None when no eligible follower exists. Soft state: cleared in
+	// (*raft).reset on every term change, never persisted.
+	heir uint64
+	// heirTenure counts consecutive heartbeat intervals r.heir has held the
+	// role, for the minHeirTenure hysteresis check in selectHeir.
+	heirTenure int
+	// heirChurn counts every replacement (or loss) of a previously-set heir
+	// over this raft instance's lifetime (DESIGN.md §2.3: "heir-churn count
+	// is a first-class metric"). Deliberately NOT reset in (*raft).reset --
+	// it's a cumulative monitoring counter, not soft state.
+	heirChurn uint64
+
+	// knownHeir and heirSeenTick are follower-side soft state recording the
+	// leader's last announcement (DESIGN.md §2.4): who the heir is, and how
+	// many ticks ago that was last confirmed. Both cleared in (*raft).reset
+	// on term change. See currentHeir for the staleness-aware read.
+	knownHeir    uint64
+	heirSeenTick int
 }
 
 func newRaft(c *Config) *raft {
@@ -591,6 +625,11 @@ func newRaft(c *Config) *raft {
 		stepDownOnRemoval:           c.StepDownOnRemoval,
 		traceLogger:                 c.TraceLogger,
 		stabilityScorer:             c.StabilityScorer,
+		heirElection:                c.HeirElection,
+		maxHeirLag:                  c.MaxHeirLag,
+		hysteresisMargin:            c.HysteresisMargin,
+		minHeirTenure:               c.MinHeirTenure,
+		heirStaleness:               c.HeirStaleness,
 	}
 
 	traceInitState(r)
@@ -782,6 +821,7 @@ func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
 		LogTerm: new(prevTerm),
 		Entries: ents,
 		Commit:  new(r.raftLog.committed),
+		Heir:    r.heirStamp(),
 	})
 	pr.SentEntries(len(ents), uint64(payloadsSize(ents)))
 	pr.SentCommit(r.raftLog.committed)
@@ -832,6 +872,7 @@ func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 		Type:    pb.MsgHeartbeat.Enum(),
 		Commit:  new(commit),
 		Context: ctx,
+		Heir:    r.heirStamp(),
 	})
 	pr.SentCommit(commit)
 }
@@ -934,6 +975,15 @@ func (r *raft) reset(term uint64) {
 	r.pendingConfIndex = 0
 	r.uncommittedSize = 0
 	r.readOnly = newReadOnly(r.readOnly.option)
+
+	// HeirRaft soft state (DESIGN.md §2.3/§2.4): both the leader's designated
+	// heir and a follower's belief about who the heir is are lost on every
+	// term change. heirChurn is deliberately left untouched -- it's a
+	// cumulative metric, not soft state.
+	r.heir = None
+	r.heirTenure = 0
+	r.knownHeir = None
+	r.heirSeenTick = 0
 }
 
 func (r *raft) appendEntry(es ...*pb.Entry) (accepted bool) {
@@ -976,6 +1026,7 @@ func (r *raft) appendEntry(es ...*pb.Entry) (accepted bool) {
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
 	r.electionElapsed++
+	r.heirSeenTick++
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
@@ -1009,6 +1060,11 @@ func (r *raft) tickHeartbeat() {
 
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
+		// Run heir selection exactly once per heartbeat interval (DESIGN.md
+		// §2.3), here rather than in bcastHeartbeat -- the latter is also
+		// invoked ad hoc for ReadOnlySafe read-index rounds, which would
+		// otherwise skew heirTenure's once-per-interval counting.
+		r.selectHeir()
 		if err := r.Step(&pb.Message{From: new(r.id), Type: pb.MsgBeat.Enum()}); err != nil {
 			r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
 		}
@@ -1934,7 +1990,132 @@ func (r *raft) stabilityStamp() *uint32 {
 	return new(uint32(r.stabilityScorer.Score()))
 }
 
+// heirStamp returns the leader's currently designated heir to attach to an
+// outgoing MsgHeartbeat/MsgApp, or nil if none is designated. nil (rather
+// than a zero ID) keeps the message wire-identical to stock when
+// HeirElection is off, since r.heir then never leaves None (DESIGN.md §2.4).
+func (r *raft) heirStamp() *uint64 {
+	if r.heir == None {
+		return nil
+	}
+	return new(r.heir)
+}
+
+// selectHeir runs the leader-side heir-selection algorithm (DESIGN.md §2.3)
+// once per heartbeat interval: rank eligible followers by stability score
+// and replace the current heir only past the hysteresis gate (or
+// immediately, if the current heir became ineligible). A no-op when
+// HeirElection is off.
+func (r *raft) selectHeir() {
+	if !r.heirElection {
+		return
+	}
+
+	lastIndex := r.raftLog.lastIndex()
+	voters := r.trk.Config.Voters.IDs()
+
+	var bestID uint64
+	var bestScore uint8
+	found := false
+	r.trk.Visit(func(id uint64, pr *tracker.Progress) {
+		if id == r.id || !r.heirEligible(id, pr, lastIndex, voters) {
+			return
+		}
+		if !found || pr.StabilityScore > bestScore {
+			bestID, bestScore, found = id, pr.StabilityScore, true
+		}
+	})
+
+	if !found {
+		r.changeHeir(None)
+		return
+	}
+	if r.heir == None || bestID == r.heir {
+		r.changeHeir(bestID)
+		return
+	}
+
+	// A different eligible follower scores higher than the current heir
+	// (see the Visit loop above: bestID can only differ from r.heir if the
+	// current heir was in the running and lost on score). Replace it only if
+	// the current heir has itself become ineligible, or both the hysteresis
+	// margin and the minimum tenure are satisfied.
+	curPr := r.trk.Progress[r.heir]
+	if curPr == nil || !r.heirEligible(r.heir, curPr, lastIndex, voters) {
+		r.changeHeir(bestID)
+		return
+	}
+	if int(bestScore) >= int(curPr.StabilityScore)+int(r.hysteresisMargin) && r.heirTenure >= r.minHeirTenure {
+		r.changeHeir(bestID)
+		return
+	}
+	r.heirTenure++
+}
+
+// heirEligible reports whether follower id may be designated heir
+// (DESIGN.md §2.3 eligibility gate): a voter, recently active, has reported
+// a score this term, and isn't lagging the leader's log by more than
+// maxHeirLag entries.
+func (r *raft) heirEligible(id uint64, pr *tracker.Progress, lastIndex uint64, voters map[uint64]struct{}) bool {
+	if _, ok := voters[id]; !ok {
+		return false
+	}
+	if !pr.RecentActive || !pr.ScoreReported {
+		return false
+	}
+	var lag uint64
+	if pr.Match < lastIndex {
+		lag = lastIndex - pr.Match
+	}
+	return lag <= r.maxHeirLag
+}
+
+// changeHeir sets the leader's designated heir, resetting tenure and
+// counting churn for every actual change other than the very first pick
+// (DESIGN.md §2.3: churn is a first-class metric of the mechanism's own
+// instability, so going from "no heir" to a first heir doesn't count, but
+// losing or replacing one does).
+func (r *raft) changeHeir(id uint64) {
+	if r.heir == id {
+		return
+	}
+	if r.heir != None {
+		r.heirChurn++
+		r.logger.Infof("%x heir changed from %x to %x", r.id, r.heir, id)
+	} else {
+		r.logger.Infof("%x heir set to %x", r.id, id)
+	}
+	r.heir = id
+	r.heirTenure = 0
+}
+
+// recordHeir updates follower-side soft state from an incoming
+// MsgHeartbeat/MsgApp's Heir field (DESIGN.md §2.4). A nil field (HeirElection
+// off, or an old-version leader) leaves existing state untouched.
+func (r *raft) recordHeir(m *pb.Message) {
+	if m.Heir == nil {
+		return
+	}
+	r.knownHeir = m.GetHeir()
+	r.heirSeenTick = 0
+}
+
+// currentHeir returns the follower's belief about the live heir, or None if
+// no heir is known or the last announcement is older than HeirStaleness
+// heartbeat intervals (DESIGN.md §2.4/§2.5 hint expiry).
+func (r *raft) currentHeir() uint64 {
+	if r.knownHeir == None {
+		return None
+	}
+	if r.heirSeenTick > r.heirStaleness*r.heartbeatTimeout {
+		return None
+	}
+	return r.knownHeir
+}
+
 func (r *raft) handleAppendEntries(m *pb.Message) {
+	r.recordHeir(m)
+
 	// TODO(pav-kv): construct logSlice up the stack next to receiving the
 	// message, and validate it before taking any action (e.g. bumping term).
 	a := logSliceFromMsgApp(m)
@@ -1980,6 +2161,7 @@ func (r *raft) handleAppendEntries(m *pb.Message) {
 }
 
 func (r *raft) handleHeartbeat(m *pb.Message) {
+	r.recordHeir(m)
 	r.raftLog.commitTo(m.GetCommit())
 	r.send(&pb.Message{To: m.From, Type: pb.MsgHeartbeatResp.Enum(), Context: m.GetContext(), Stability: r.stabilityStamp()})
 }

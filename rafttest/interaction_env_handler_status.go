@@ -39,5 +39,10 @@ func (env *InteractionEnv) Status(idx int) error {
 		m[id] = &pr
 	}
 	fmt.Fprint(env.Output, m)
+	// T4.4 (TASKS.md): surface heir + churn once HeirRaft is actually in use,
+	// so existing golden files (HeirElection always off) stay byte-identical.
+	if st.Heir != 0 || st.HeirChurn != 0 {
+		fmt.Fprintf(env.Output, "heir=%d churn=%d\n", st.Heir, st.HeirChurn)
+	}
 	return nil
 }

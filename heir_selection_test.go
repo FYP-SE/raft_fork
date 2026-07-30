@@ -1,0 +1,329 @@
+package raft
+
+import (
+	"testing"
+
+	pb "go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/raft/v3/stability"
+)
+
+// T4.4 (TASKS.md) -- heir selection + announcement. Written before the
+// selectHeir/heirEligible/changeHeir/recordHeir/currentHeir implementation
+// lands in raft.go, per the project's TDD convention. Exercises the
+// DESIGN.md §2.3 algorithm directly against a *raft built via newTestRaft,
+// manipulating tracker.Progress by hand rather than driving a full
+// interaction-test cluster -- this lets edge cases (lag boundary, margin
+// overflow, ineligibility) be asserted precisely and fast. A companion
+// datadriven test (testdata/heir_selection.txt) covers the end-to-end wire
+// path: score -> selection -> Heir field on MsgHeartbeat -> status output.
+
+// newHeirTestRaft builds a 3-voter (ids 1,2,3) leader raft with HeirElection
+// on and a ConstScorer(0) (irrelevant to these tests -- individual follower
+// scores are set directly on tracker.Progress instead of flowing through the
+// wire, since these tests are about the selection algorithm, not dissemination).
+func newHeirTestRaft(t *testing.T, extraVoters ...uint64) *raft {
+	t.Helper()
+	peers := append([]uint64{1, 2, 3}, extraVoters...)
+	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(peers...)))
+	cfg.StabilityScorer = stability.ConstScorer(0)
+	cfg.HeirElection = true
+	r := newRaft(cfg)
+	r.becomeCandidate()
+	r.becomeLeader()
+	return r
+}
+
+// setProgress overwrites the leader's view of follower id's progress for
+// test setup -- eligibility and score fields are what selectHeir reads.
+func setProgress(r *raft, id uint64, active, reported bool, score uint8, match uint64) {
+	pr := r.trk.Progress[id]
+	pr.RecentActive = active
+	pr.ScoreReported = reported
+	pr.StabilityScore = score
+	pr.Match = match
+}
+
+func TestSelectHeir_PicksTopEligibleScorer(t *testing.T) {
+	r := newHeirTestRaft(t)
+	last := r.raftLog.lastIndex()
+	setProgress(r, 2, true, true, 100, last)
+	setProgress(r, 3, true, true, 200, last)
+
+	r.selectHeir()
+
+	if r.heir != 3 {
+		t.Fatalf("heir = %d, want 3 (highest score)", r.heir)
+	}
+	if r.heirChurn != 0 {
+		t.Fatalf("heirChurn = %d, want 0 (first-ever pick isn't churn)", r.heirChurn)
+	}
+}
+
+func TestSelectHeir_IgnoresLearner(t *testing.T) {
+	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1, 2), withLearners(3)))
+	cfg.StabilityScorer = stability.ConstScorer(0)
+	cfg.HeirElection = true
+	r := newRaft(cfg)
+	r.becomeCandidate()
+	r.becomeLeader()
+
+	last := r.raftLog.lastIndex()
+	setProgress(r, 2, true, true, 50, last)
+	setProgress(r, 3, true, true, 255, last) // learner, highest score
+
+	r.selectHeir()
+
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2 (learner 3 must never be picked despite higher score)", r.heir)
+	}
+}
+
+func TestSelectHeir_IgnoresInactiveOrUnreported(t *testing.T) {
+	r := newHeirTestRaft(t)
+	last := r.raftLog.lastIndex()
+	setProgress(r, 2, true, true, 50, last)
+	setProgress(r, 3, false, true, 255, last) // highest score, but not RecentActive
+
+	r.selectHeir()
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2 (inactive follower 3 must be excluded)", r.heir)
+	}
+
+	setProgress(r, 3, true, false, 255, last) // active now, but never reported a score
+	r.selectHeir()
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2 (follower 3 with ScoreReported=false must be excluded)", r.heir)
+	}
+}
+
+func TestSelectHeir_IgnoresLaggingFollower(t *testing.T) {
+	r := newHeirTestRaft(t)
+	r.maxHeirLag = 0 // zero tolerance: any lag at all disqualifies
+	last := r.raftLog.lastIndex()
+	setProgress(r, 2, true, true, 50, last)
+	setProgress(r, 3, true, true, 255, 0) // behind by last-0, highest score
+
+	r.selectHeir()
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2 (follower 3 lags beyond maxHeirLag=0)", r.heir)
+	}
+}
+
+func TestSelectHeir_HysteresisMarginBlocksNearbyChallenger(t *testing.T) {
+	r := newHeirTestRaft(t)
+	r.hysteresisMargin = 20
+	r.minHeirTenure = 0 // isolate the margin check from the tenure check
+	last := r.raftLog.lastIndex()
+
+	setProgress(r, 2, true, true, 200, last)
+	setProgress(r, 3, false, false, 0, last) // not yet eligible
+	r.selectHeir()
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2 (only eligible follower)", r.heir)
+	}
+
+	// Follower 3 becomes eligible with a score only 10 above the heir's --
+	// below the 20-point margin. Run selection several times; it must never
+	// flip, no matter how many intervals pass.
+	setProgress(r, 3, true, true, 210, last)
+	for i := 0; i < 5; i++ {
+		r.selectHeir()
+		if r.heir != 2 {
+			t.Fatalf("iteration %d: heir = %d, want 2 (10-point lead is under the 20-point margin)", i, r.heir)
+		}
+	}
+	if r.heirChurn != 0 {
+		t.Fatalf("heirChurn = %d, want 0 (margin must prevent any replacement)", r.heirChurn)
+	}
+}
+
+func TestSelectHeir_HysteresisTenureDelaysReplacement(t *testing.T) {
+	r := newHeirTestRaft(t)
+	r.hysteresisMargin = 20
+	r.minHeirTenure = 3
+	last := r.raftLog.lastIndex()
+
+	setProgress(r, 2, true, true, 100, last)
+	setProgress(r, 3, false, false, 0, last)
+	r.selectHeir() // heir = 2, tenure = 0
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2", r.heir)
+	}
+
+	// Follower 3 clears the margin (255 vs 100) but the heir's tenure hasn't
+	// reached minHeirTenure=3 yet -- replacement must wait. Each call that
+	// doesn't replace bumps heirTenure by one (0->1->2->3); the check runs
+	// before the bump, so it takes minHeirTenure+1 calls since heir 2 was set
+	// before a replacement is allowed.
+	setProgress(r, 3, true, true, 255, last)
+	for i := 0; i < 3; i++ {
+		r.selectHeir()
+		if r.heir != 2 {
+			t.Fatalf("iteration %d: heir = %d, want 2 (tenure hasn't reached minHeirTenure=3 yet)", i, r.heir)
+		}
+	}
+	if r.heirChurn != 0 {
+		t.Fatalf("heirChurn = %d, want 0 before tenure is satisfied", r.heirChurn)
+	}
+
+	r.selectHeir() // heirTenure has now reached 3 -> replace
+	if r.heir != 3 {
+		t.Fatalf("heir = %d, want 3 (margin cleared and minHeirTenure reached)", r.heir)
+	}
+	if r.heirChurn != 1 {
+		t.Fatalf("heirChurn = %d, want 1 after the one replacement", r.heirChurn)
+	}
+}
+
+func TestSelectHeir_ReplacesHeirThatBecomesIneligible(t *testing.T) {
+	r := newHeirTestRaft(t)
+	r.hysteresisMargin = 200 // deliberately huge, so only ineligibility can force a change
+	r.minHeirTenure = 1000
+	last := r.raftLog.lastIndex()
+
+	setProgress(r, 2, true, true, 255, last)
+	setProgress(r, 3, true, true, 10, last)
+	r.selectHeir()
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2", r.heir)
+	}
+
+	// Heir 2 goes inactive. Even though 3's score is far below what the
+	// margin/tenure gates would ever allow, an ineligible heir must be
+	// replaced immediately.
+	setProgress(r, 2, false, true, 255, last)
+	r.selectHeir()
+	if r.heir != 3 {
+		t.Fatalf("heir = %d, want 3 (heir 2 became ineligible; must be replaced regardless of margin/tenure)", r.heir)
+	}
+	if r.heirChurn != 1 {
+		t.Fatalf("heirChurn = %d, want 1", r.heirChurn)
+	}
+}
+
+func TestSelectHeir_NoEligibleFollowerClearsHeir(t *testing.T) {
+	r := newHeirTestRaft(t)
+	last := r.raftLog.lastIndex()
+	setProgress(r, 2, true, true, 100, last)
+	setProgress(r, 3, true, true, 50, last)
+	r.selectHeir()
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2", r.heir)
+	}
+
+	setProgress(r, 2, false, true, 100, last)
+	setProgress(r, 3, false, true, 50, last)
+	r.selectHeir()
+	if r.heir != None {
+		t.Fatalf("heir = %d, want None (no eligible follower left)", r.heir)
+	}
+	if r.heirChurn != 1 {
+		t.Fatalf("heirChurn = %d, want 1 (losing a heir counts as churn)", r.heirChurn)
+	}
+}
+
+func TestSelectHeir_DisabledIsNoOp(t *testing.T) {
+	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+	// HeirElection left false (and StabilityScorer nil): DESIGN.md/CLAUDE.md
+	// constraint 4, behaviour must be a no-op.
+	r := newRaft(cfg)
+	r.becomeCandidate()
+	r.becomeLeader()
+	last := r.raftLog.lastIndex()
+	setProgress(r, 2, true, true, 255, last)
+
+	r.selectHeir()
+
+	if r.heir != None {
+		t.Fatalf("heir = %d, want None when HeirElection is disabled", r.heir)
+	}
+}
+
+func TestRaftReset_ClearsHeirSoftStateButNotChurn(t *testing.T) {
+	r := newHeirTestRaft(t)
+	r.heir = 2
+	r.heirTenure = 7
+	r.heirChurn = 3
+	r.knownHeir = 9
+	r.heirSeenTick = 4
+
+	r.reset(r.Term + 1)
+
+	if r.heir != None {
+		t.Errorf("heir = %d, want None after reset", r.heir)
+	}
+	if r.heirTenure != 0 {
+		t.Errorf("heirTenure = %d, want 0 after reset", r.heirTenure)
+	}
+	if r.knownHeir != None {
+		t.Errorf("knownHeir = %d, want None after reset", r.knownHeir)
+	}
+	if r.heirSeenTick != 0 {
+		t.Errorf("heirSeenTick = %d, want 0 after reset", r.heirSeenTick)
+	}
+	if r.heirChurn != 3 {
+		t.Errorf("heirChurn = %d, want unchanged at 3 (cumulative metric, not soft state)", r.heirChurn)
+	}
+}
+
+func TestRaft_HeirStamp(t *testing.T) {
+	r := newHeirTestRaft(t)
+	if got := r.heirStamp(); got != nil {
+		t.Fatalf("heirStamp() = %v, want nil before any heir is selected", got)
+	}
+	r.heir = 2
+	got := r.heirStamp()
+	if got == nil || *got != 2 {
+		t.Fatalf("heirStamp() = %v, want pointer to 2", got)
+	}
+}
+
+func TestRaft_RecordHeirAndCurrentHeir(t *testing.T) {
+	cfg := newTestConfig(2, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+	cfg.StabilityScorer = stability.ConstScorer(0)
+	cfg.HeirElection = true
+	r := newRaft(cfg)
+	r.becomeFollower(1, 1)
+
+	if got := r.currentHeir(); got != None {
+		t.Fatalf("currentHeir() = %d, want None before any announcement", got)
+	}
+
+	r.recordHeir(newHeirMsg(3))
+	if r.knownHeir != 3 {
+		t.Fatalf("knownHeir = %d, want 3", r.knownHeir)
+	}
+	if r.heirSeenTick != 0 {
+		t.Fatalf("heirSeenTick = %d, want 0 right after an announcement", r.heirSeenTick)
+	}
+	if got := r.currentHeir(); got != 3 {
+		t.Fatalf("currentHeir() = %d, want 3 (fresh announcement)", got)
+	}
+
+	// heirStaleness defaults to 4 heartbeat intervals; heartbeatTimeout is 1
+	// tick here, so exceeding 4 ticks since the last announcement must expire it.
+	r.heirSeenTick = r.heirStaleness*r.heartbeatTimeout + 1
+	if got := r.currentHeir(); got != None {
+		t.Fatalf("currentHeir() = %d, want None once the staleness bound is exceeded", got)
+	}
+}
+
+func TestRaft_RecordHeirIgnoresAbsentField(t *testing.T) {
+	cfg := newTestConfig(2, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+	r := newRaft(cfg)
+	r.becomeFollower(1, 1)
+	r.knownHeir = 5
+	r.heirSeenTick = 2
+
+	r.recordHeir(&pb.Message{}) // no Heir field set at all
+
+	if r.knownHeir != 5 || r.heirSeenTick != 2 {
+		t.Fatalf("recordHeir must be a no-op when m.Heir is nil, got knownHeir=%d heirSeenTick=%d", r.knownHeir, r.heirSeenTick)
+	}
+}
+
+// newHeirMsg builds a minimal message carrying a non-nil Heir field, as a
+// leader's MsgHeartbeat/MsgApp would (DESIGN.md §2.4).
+func newHeirMsg(heir uint64) *pb.Message {
+	return &pb.Message{Heir: new(heir)}
+}

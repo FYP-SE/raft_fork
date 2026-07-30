@@ -39,6 +39,15 @@ type BasicStatus struct {
 	Applied uint64
 
 	LeadTransferee uint64
+
+	// Heir is this peer's currently designated successor (DESIGN.md §2.3),
+	// or None if it isn't a leader, HeirElection is off, or no follower is
+	// currently eligible.
+	Heir uint64
+	// HeirChurn counts every heir replacement (or loss) over this raft
+	// instance's lifetime -- "a first-class metric" per DESIGN.md §2.3, so
+	// the mechanism's own anti-flap hysteresis can be measured.
+	HeirChurn uint64
 }
 
 func getProgressCopy(r *raft) map[uint64]tracker.Progress {
@@ -57,6 +66,8 @@ func getBasicStatus(r *raft) BasicStatus {
 	s := BasicStatus{
 		ID:             r.id,
 		LeadTransferee: r.leadTransferee,
+		Heir:           r.heir,
+		HeirChurn:      r.heirChurn,
 	}
 	s.HardState = r.hardState()
 	s.SoftState = r.softState()
