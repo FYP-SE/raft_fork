@@ -592,6 +592,12 @@ type raft struct {
 	// is a first-class metric"). Deliberately NOT reset in (*raft).reset --
 	// it's a cumulative monitoring counter, not soft state.
 	heirChurn uint64
+	// gracefulHandoverCount counts every proactive leadership transfer this
+	// leader has actually triggered via maybeGracefulHandover (DESIGN.md
+	// §2.6), for etcd's etcd_heirraft_graceful_handover_total metric (T5.2).
+	// Same precedent as heirChurn: cumulative, monitoring-only, deliberately
+	// NOT reset in (*raft).reset.
+	gracefulHandoverCount uint64
 
 	// knownHeir and heirSeenTick are follower-side soft state recording the
 	// leader's last announcement (DESIGN.md §2.4): who the heir is, and how
@@ -1093,6 +1099,35 @@ func (r *raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	r.electionElapsed++
 
+	// Heir selection and the self-degradation check must run before the
+	// CheckQuorum branch below (T5.2, real bug found via live 3-node
+	// cluster testing, 2026-07-31, RESEARCH_LOG.md): CheckQuorum (vanilla
+	// raft, stepLeader's MsgCheckQuorum case) periodically zeroes every
+	// Progress.RecentActive as its own bookkeeping for the next CheckQuorum
+	// window. With etcd's real defaults (HeartbeatTick=1, so
+	// heartbeatElapsed hits its threshold on literally every tick), that
+	// reset coincides with a selectHeir call once every
+	// electionTimeout/heartbeatTimeout ticks. Running CheckQuorum first
+	// used to make selectHeir read the just-zeroed RecentActive on that
+	// tick, treating a perfectly healthy heir as suddenly ineligible and
+	// replacing it unconditionally -- bypassing hysteresis/tenure via the
+	// "heir became ineligible" branch, then reselecting it the very next
+	// tick once fresh responses arrived. Running heir selection first means
+	// it always sees the prior interval's settled RecentActive state.
+	//
+	// This block deliberately only peeks at the heartbeatElapsed condition
+	// (read-only, no reset here) and doesn't send anything itself -- the
+	// actual heartbeat broadcast (MsgBeat) stays at its original position
+	// below, gated on a state check performed *after* CheckQuorum, so a
+	// leader that steps down via CheckQuorum on this exact tick still sends
+	// no trailing heartbeat (vanilla raft's existing, correct behaviour --
+	// first attempt at this fix moved the whole heartbeat block up and
+	// broke that invariant, caught by testdata/checkquorum.txt).
+	if r.state == StateLeader && r.heartbeatElapsed >= r.heartbeatTimeout {
+		r.selectHeir()
+		r.maybeGracefulHandover()
+	}
+
 	if r.electionElapsed >= r.electionTimeout {
 		r.electionElapsed = 0
 		if r.checkQuorum {
@@ -1112,14 +1147,6 @@ func (r *raft) tickHeartbeat() {
 
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
-		// Run heir selection exactly once per heartbeat interval (DESIGN.md
-		// §2.3), here rather than in bcastHeartbeat -- the latter is also
-		// invoked ad hoc for ReadOnlySafe read-index rounds, which would
-		// otherwise skew heirTenure's once-per-interval counting.
-		r.selectHeir()
-		// Self-degradation check (DESIGN.md §2.6), run right after selection
-		// so it sees this interval's freshly-chosen heir.
-		r.maybeGracefulHandover()
 		if err := r.Step(&pb.Message{From: new(r.id), Type: pb.MsgBeat.Enum()}); err != nil {
 			r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
 		}
@@ -2202,6 +2229,7 @@ func (r *raft) maybeGracefulHandover() {
 	}
 
 	r.handoverCooldownRemaining = r.handoverCooldown * r.electionTimeout
+	r.gracefulHandoverCount++
 	if err := r.Step(&pb.Message{From: new(r.heir), Type: pb.MsgTransferLeader.Enum()}); err != nil {
 		r.logger.Warningf("%x graceful handover to %x failed: %v", r.id, r.heir, err)
 	}

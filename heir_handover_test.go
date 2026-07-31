@@ -185,3 +185,74 @@ func TestRaftReset_ClearsHandoverSoftState(t *testing.T) {
 		t.Errorf("handoverCooldownRemaining = %d, want 0 after reset", r.handoverCooldownRemaining)
 	}
 }
+
+// T5.2 (TASKS.md) -- gracefulHandoverCount, added for etcd's
+// etcd_heirraft_graceful_handover_total Prometheus metric (the task text's
+// "export from raft Status"). Mirrors heirChurn's precedent exactly
+// (T4.4): a cumulative, monitoring-only counter, deliberately NOT reset in
+// (*raft).reset.
+
+func TestMaybeGracefulHandover_CountsOnlyActualTriggers(t *testing.T) {
+	r, v := newHandoverTestRaft(t, 3, 100)
+	setEligibleHeir(r, 2, 255)
+	v.Set(30) // below HandoverThreshold=64
+
+	for i := 0; i < 2; i++ {
+		r.maybeGracefulHandover()
+		if r.gracefulHandoverCount != 0 {
+			t.Fatalf("iteration %d: gracefulHandoverCount = %d, want 0 before degradeWindow=3 is reached", i, r.gracefulHandoverCount)
+		}
+	}
+	r.maybeGracefulHandover() // 3rd consecutive degraded tick: triggers
+	if r.gracefulHandoverCount != 1 {
+		t.Fatalf("gracefulHandoverCount = %d, want 1 after the trigger", r.gracefulHandoverCount)
+	}
+
+	// Further ticks are gated by the cooldown -- count must not double-tick.
+	for i := 0; i < 5; i++ {
+		r.maybeGracefulHandover()
+	}
+	if r.gracefulHandoverCount != 1 {
+		t.Fatalf("gracefulHandoverCount = %d, want still 1 while cooldown gates further attempts", r.gracefulHandoverCount)
+	}
+}
+
+func TestMaybeGracefulHandover_GatedCallsNeverCount(t *testing.T) {
+	// No eligible heir at all -- every call below is gated before the
+	// trigger point maybeGracefulHandover_TriggersAfterDegradeWindow reaches.
+	r, v := newHandoverTestRaft(t, 2, 100)
+	v.Set(10)
+	for i := 0; i < 10; i++ {
+		r.maybeGracefulHandover()
+	}
+	if r.gracefulHandoverCount != 0 {
+		t.Fatalf("gracefulHandoverCount = %d, want 0 with no eligible heir ever", r.gracefulHandoverCount)
+	}
+}
+
+func TestGracefulHandoverCount_NotResetOnTermChange(t *testing.T) {
+	r, v := newHandoverTestRaft(t, 1, 100)
+	setEligibleHeir(r, 2, 255)
+	v.Set(30)
+	r.maybeGracefulHandover()
+	if r.gracefulHandoverCount != 1 {
+		t.Fatalf("gracefulHandoverCount = %d, want 1 after trigger", r.gracefulHandoverCount)
+	}
+
+	r.reset(r.Term + 1)
+
+	if r.gracefulHandoverCount != 1 {
+		t.Fatalf("gracefulHandoverCount = %d, want unchanged (1) after reset -- it's a cumulative monitoring counter, not soft state", r.gracefulHandoverCount)
+	}
+}
+
+func TestBasicStatus_ExposesGracefulHandoverCount(t *testing.T) {
+	r, v := newHandoverTestRaft(t, 1, 100)
+	setEligibleHeir(r, 2, 255)
+	v.Set(30)
+	r.maybeGracefulHandover()
+
+	if got := getBasicStatus(r).GracefulHandoverCount; got != 1 {
+		t.Fatalf("getBasicStatus(r).GracefulHandoverCount = %d, want 1", got)
+	}
+}

@@ -332,3 +332,71 @@ func TestRaft_RecordHeirIgnoresAbsentField(t *testing.T) {
 func newHeirMsg(heir uint64) *pb.Message {
 	return &pb.Message{Heir: new(heir)}
 }
+
+// T5.2 (TASKS.md) regression test for a real bug found via live 3-node
+// cluster testing (2026-07-31, RESEARCH_LOG.md): vanilla raft's own
+// MsgCheckQuorum handling (stepLeader, unrelated to HeirRaft) periodically
+// zeroes every Progress.RecentActive as bookkeeping for the *next*
+// CheckQuorum window. With etcd's real defaults (HeartbeatTick=1, so
+// heartbeatElapsed hits its threshold on literally every tick), that reset
+// coincides with a selectHeir call once every electionTimeout/heartbeatTimeout
+// ticks. tickHeartbeat used to run the CheckQuorum branch (and its
+// RecentActive reset) BEFORE the heir-selection branch, so on the colliding
+// tick selectHeir read a just-zeroed RecentActive and treated a perfectly
+// healthy heir as suddenly ineligible -- bypassing hysteresis/tenure
+// entirely via the "heir became ineligible" branch in selectHeir, and
+// immediately reselecting it the very next tick once fresh responses came
+// in. Observed live as heir_changes_total climbing by thousands within
+// seconds, forever, on any real cluster with CheckQuorum on (etcd always
+// sets it true) -- never caught by Phase 4's unit/datadriven tests because
+// none of them exercised CheckQuorum=true (newTestConfig defaults it
+// false, and no T4.x heir test opted in). Fixed by running heir selection
+// before the CheckQuorum branch in tickHeartbeat, so it always sees the
+// prior interval's settled RecentActive state.
+func TestTickHeartbeat_CheckQuorumResetDoesNotChurnHealthyHeir(t *testing.T) {
+	cfg := newTestConfig(1, 3, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+	cfg.StabilityScorer = stability.ConstScorer(0)
+	cfg.HeirElection = true
+	cfg.CheckQuorum = true // the real etcd default (raftConfig in bootstrap.go); newTestConfig itself defaults this false
+	r := newRaft(cfg)
+	r.becomeCandidate()
+	r.becomeLeader()
+
+	// Mark both followers active and reporting, as real heartbeat responses
+	// would -- mirrors setEligibleHeir's style (heir_handover_test.go).
+	for _, id := range []uint64{2, 3} {
+		pr := r.trk.Progress[id]
+		pr.RecentActive = true
+		pr.ScoreReported = true
+		pr.StabilityScore = 200
+		pr.Match = r.raftLog.lastIndex()
+	}
+
+	var churn int
+	var everNone bool
+	for i := 0; i < 60; i++ { // several multiples of electionTimeout=3
+		r.tickHeartbeat()
+		if r.heir == None {
+			everNone = true
+		}
+		// Re-mark active on every tick, as real MsgHeartbeatResp/MsgAppResp
+		// handling (recordHeir's callers) would -- the bug reproduces even
+		// with continuously live followers, since the reset+reselect both
+		// happen inside the very same tick, before any response can arrive.
+		for _, id := range []uint64{2, 3} {
+			pr := r.trk.Progress[id]
+			pr.RecentActive = true
+			pr.ScoreReported = true
+			pr.StabilityScore = 200
+			pr.Match = r.raftLog.lastIndex()
+		}
+	}
+	churn = int(r.heirChurn)
+
+	if everNone {
+		t.Error("heir dropped to None at some point despite followers being continuously eligible -- CheckQuorum's RecentActive reset raced selectHeir")
+	}
+	if churn != 0 {
+		t.Errorf("heirChurn = %d, want 0 -- a continuously-eligible heir must never churn", churn)
+	}
+}

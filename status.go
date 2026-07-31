@@ -48,6 +48,10 @@ type BasicStatus struct {
 	// instance's lifetime -- "a first-class metric" per DESIGN.md §2.3, so
 	// the mechanism's own anti-flap hysteresis can be measured.
 	HeirChurn uint64
+	// GracefulHandoverCount counts every proactive leadership transfer this
+	// leader has triggered via maybeGracefulHandover (DESIGN.md §2.6) over
+	// this raft instance's lifetime.
+	GracefulHandoverCount uint64
 }
 
 func getProgressCopy(r *raft) map[uint64]tracker.Progress {
@@ -64,10 +68,11 @@ func getProgressCopy(r *raft) map[uint64]tracker.Progress {
 
 func getBasicStatus(r *raft) BasicStatus {
 	s := BasicStatus{
-		ID:             r.id,
-		LeadTransferee: r.leadTransferee,
-		Heir:           r.heir,
-		HeirChurn:      r.heirChurn,
+		ID:                    r.id,
+		LeadTransferee:        r.leadTransferee,
+		Heir:                  r.heir,
+		HeirChurn:             r.heirChurn,
+		GracefulHandoverCount: r.gracefulHandoverCount,
 	}
 	s.HardState = r.hardState()
 	s.SoftState = r.softState()
