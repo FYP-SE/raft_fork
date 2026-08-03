@@ -1,0 +1,422 @@
+# T6.2 (TASKS.md) -- DESIGN.md §3 degenerate-case table, row "Two nodes
+# both believe they're heir (stale announcement across heir change)": a
+# heir-change announcement reaches one follower but not the other (message
+# genuinely lost, via deliver-msgs drop), so one node still believes the
+# *old* heir assignment (itself) while the other correctly believes the
+# *new* one (also itself). Both then race on the heir-biased fast timeout
+# and split the vote -- "same as vanilla split candidacy" -- before a
+# second, ordinary round resolves it cleanly. Round two's winner is pinned
+# via set-randomized-election-timeout rather than left to the real PRNG, so
+# the golden file is deterministic; DESIGN.md's "resolved by randomized
+# jitter" is the real mechanism this stands in for.
+#
+# min-heir-tenure=1 lets the second heir change (2 -> 3, after node 3's
+# score is bumped) take effect on the very next heartbeat instead of
+# waiting out the default 10-interval hysteresis window -- irrelevant to
+# what this test is about, so kept out of the way.
+
+log-level error
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50 min-heir-tenure=1
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true mutable-stability-score=200 min-heir-tenure=1
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true mutable-stability-score=50 min-heir-tenure=1
+----
+ok
+
+campaign 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  1->2 MsgVote Term:1 Log:1/2
+  1->3 MsgVote Term:1 Log:1/2
+> 2 receiving messages
+  1->2 MsgVote Term:1 Log:1/2
+> 3 receiving messages
+  1->3 MsgVote Term:1 Log:1/2
+> 2 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  2->1 MsgVoteResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  3->1 MsgVoteResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgVoteResp Term:1 Log:0/0
+  3->1 MsgVoteResp Term:1 Log:0/0
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateLeader
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+
+# First selection: 2 (200) beats 3 (50) -- heir=2, announced to both.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=200
+3: StateReplicate match=3 next=4 score=50
+heir=2 churn=0
+
+# 3's score jumps well past 2's by more than the hysteresis margin.
+set-stability-score 3 score=255
+----
+ok
+
+# This heartbeat round still re-selects using the *old* scores -- selectHeir
+# runs synchronously inside tick-heartbeat, before 3's updated-score
+# response for this very round has even been delivered. heir stays 2.
+# Delivered to everyone: it changes nothing 2 doesn't already believe, so
+# there's nothing to protect it from.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=200
+3: StateReplicate match=3 next=4 score=255
+heir=2 churn=0
+
+# The leader now knows 3's new score, and this round's selection sees 3 as
+# a genuine challenger for the first time -- but changeHeir's hysteresis
+# gate (raft.go selectHeir) requires r.heirTenure >= MinHeirTenure(1), and
+# tenure only starts accumulating once a challenger has been seen at all
+# (it isn't simply "rounds since heir was picked"): a bare "still winning,
+# no challenger" round never touches it. So this round just registers the
+# challenge (tenure 0 -> 1) without swapping yet. Delivered to everyone:
+# heir is still 2, changing nothing 2 doesn't already believe.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=200
+3: StateReplicate match=3 next=4 score=255
+heir=2 churn=0
+
+# *Now* tenure(1) >= MinHeirTenure(1) and the margin is still satisfied, so
+# this heartbeat tick's selection genuinely flips the heir to 3. This is
+# the round that must be kept from node 2 -- delivered to 1 and 3 only.
+tick-heartbeat 1
+----
+ok
+
+stabilize 1 3
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+# The heartbeat addressed to 2 for this round is still sitting undelivered
+# in the queue -- drop it outright (message genuinely lost in transit, not
+# merely delayed) so no later stabilize call can accidentally resurrect it
+# and hand 2 the update after all.
+deliver-msgs drop=(2)
+----
+dropped: 1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=200
+3: StateReplicate match=3 next=4 score=255
+heir=3 churn=1
+
+# The leader is deposed right here (never ticked again): 2 still believes
+# *itself* is heir (stale); 3 correctly believes *itself* is heir (fresh).
+# Both therefore use the fast heir-biased timeout (electionTimeout + tiny
+# jitter, deterministic at exactly electionTimeout with these defaults) and
+# fire in the same round, before either has heard from the other.
+tick-election 2
+----
+ok
+
+tick-election 3
+----
+ok
+
+# Both are already candidates (term 2) before any message crosses between
+# them. Each has voted for itself in term 2, so each rejects the other's
+# MsgVote -- a genuine split vote, exactly like vanilla Raft's own
+# split-candidacy case.
+stabilize 2 3
+----
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:2 Vote:2 Commit:3
+  Messages:
+  2->1 MsgVote Term:2 Log:1/3
+  2->3 MsgVote Term:2 Log:1/3
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:2 Vote:3 Commit:3
+  Messages:
+  3->1 MsgVote Term:2 Log:1/3
+  3->2 MsgVote Term:2 Log:1/3
+> 2 receiving messages
+  3->2 MsgVote Term:2 Log:1/3
+> 3 receiving messages
+  2->3 MsgVote Term:2 Log:1/3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->3 MsgVoteResp Term:2 Log:0/0 Rejected (Hint: 0)
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->2 MsgVoteResp Term:2 Log:0/0 Rejected (Hint: 0)
+> 2 receiving messages
+  3->2 MsgVoteResp Term:2 Log:0/0 Rejected (Hint: 0)
+> 3 receiving messages
+  2->3 MsgVoteResp Term:2 Log:0/0 Rejected (Hint: 0)
+
+raft-state
+----
+1: StateLeader (Voter) Term:1 Lead:1
+2: StateCandidate (Voter) Term:2 Lead:0
+3: StateCandidate (Voter) Term:2 Lead:0
+
+# Round two: heir belief was cleared on both sides by the term bump above
+# (T4.4's "heir cleared on term change"), so both are back to vanilla
+# timeouts. Pin them apart deterministically -- 3 fires well within one
+# tick-election round, 2 does not -- standing in for "resolved by
+# randomized jitter" without depending on the real PRNG.
+set-randomized-election-timeout 2 timeout=10
+----
+ok
+
+set-randomized-election-timeout 3 timeout=2
+----
+ok
+
+tick-election 3
+----
+ok
+
+tick-election 2
+----
+ok
+
+# 3 campaigns alone at the higher term; 2 (still a stale term-2 candidate)
+# sees the higher term, steps down, and grants -- same log, hasn't voted at
+# this term yet. Clean resolution, no thrashing.
+stabilize 2 3
+----
+> 3 handling Ready
+  Ready MustSync=true:
+  HardState Term:3 Vote:3 Commit:3
+  Messages:
+  3->1 MsgVote Term:3 Log:1/3
+  3->2 MsgVote Term:3 Log:1/3
+> 2 receiving messages
+  3->2 MsgVote Term:3 Log:1/3
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:3 Vote:3 Commit:3
+  Messages:
+  2->3 MsgVoteResp Term:3 Log:0/0
+> 3 receiving messages
+  2->3 MsgVoteResp Term:3 Log:0/0
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:3 State:StateLeader
+  Entries:
+  3/4 EntryNormal ""
+  Messages:
+  3->1 MsgApp Term:3 Log:1/3 Commit:3 Entries:[3/4 EntryNormal ""]
+  3->2 MsgApp Term:3 Log:1/3 Commit:3 Entries:[3/4 EntryNormal ""]
+> 2 receiving messages
+  3->2 MsgApp Term:3 Log:1/3 Commit:3 Entries:[3/4 EntryNormal ""]
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:3 State:StateFollower
+  Entries:
+  3/4 EntryNormal ""
+  Messages:
+  2->3 MsgAppResp Term:3 Log:0/4
+> 3 receiving messages
+  2->3 MsgAppResp Term:3 Log:0/4
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:3 Vote:3 Commit:4
+  CommittedEntries:
+  3/4 EntryNormal ""
+  Messages:
+  3->2 MsgApp Term:3 Log:3/4 Commit:4
+> 2 receiving messages
+  3->2 MsgApp Term:3 Log:3/4 Commit:4
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:3 Vote:3 Commit:4
+  CommittedEntries:
+  3/4 EntryNormal ""
+  Messages:
+  2->3 MsgAppResp Term:3 Log:0/4
+> 3 receiving messages
+  2->3 MsgAppResp Term:3 Log:0/4
+
+raft-state
+----
+1: StateLeader (Voter) Term:1 Lead:1
+2: StateFollower (Voter) Term:3 Lead:3
+3: StateLeader (Voter) Term:3 Lead:3

@@ -1,0 +1,265 @@
+# T6.2 (TASKS.md) -- DESIGN.md §3 degenerate-case table, row "No eligible
+# heir (all unstable/lagging)": every follower fails the eligibility gate
+# at selection time, so selectHeir finds nothing, no announcement goes out,
+# and every node's timeout falls back to the plain vanilla formula --
+# stock Raft, byte-for-byte, even though HeirElection is on.
+#
+# max-heir-lag=1 on the leader makes the lag gate trivial to fail: two
+# proposals are flushed into the leader's own log (bumping lastIndex by 2)
+# but deliberately never delivered to either follower before the heartbeat
+# tick runs selection, so both followers' Match still sits two entries
+# behind -- lag=2 > max-heir-lag=1 for both, simultaneously. (Not
+# max-heir-lag=0: Config.validate(), raft.go:421-422, treats a zero
+# MaxHeirLag as "unset" and silently defaults it to 256, same as every
+# other zero-value tunable in this Config -- passing 0 here would leave
+# the real bound at 256 and every lag in this test comfortably eligible.)
+
+log-level error
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50 max-heir-lag=1
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=255
+----
+ok
+
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=100
+----
+ok
+
+campaign 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  1->2 MsgVote Term:1 Log:1/2
+  1->3 MsgVote Term:1 Log:1/2
+> 2 receiving messages
+  1->2 MsgVote Term:1 Log:1/2
+> 3 receiving messages
+  1->3 MsgVote Term:1 Log:1/2
+> 2 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  2->1 MsgVoteResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  3->1 MsgVoteResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgVoteResp Term:1 Log:0/0
+  3->1 MsgVoteResp Term:1 Log:0/0
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateLeader
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+
+# Both followers fully caught up here (lag=0, passes max-heir-lag=1) --
+# this establishes the baseline before the lag is introduced.
+propose 1 foo
+----
+ok
+
+# Flush only the leader's own Ready (bumps its lastIndex and queues the
+# MsgApp to 2 and 3), without delivering anything -- both followers' Match
+# stays at the pre-propose index.
+process-ready 1
+----
+Ready MustSync=true:
+Entries:
+1/4 EntryNormal "foo"
+Messages:
+1->2 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
+1->3 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
+
+propose 1 bar
+----
+ok
+
+process-ready 1
+----
+Ready MustSync=true:
+Entries:
+1/5 EntryNormal "bar"
+Messages:
+1->2 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
+1->3 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
+
+# selectHeir runs synchronously inside this tick, against the lastIndex/
+# Match values as they stand right now: both followers are 2 entries
+# behind, past max-heir-lag=1. Neither is eligible.
+tick-heartbeat 1
+----
+ok
+
+# No heir=/churn= line -- HeirElection is on, but nobody qualified, so
+# nothing was ever announced. Output is byte-identical to the
+# HeirElection=off case for exactly that reason.
+status 1
+----
+1: StateReplicate match=5 next=6
+2: StateReplicate match=3 next=6 score=255 inflight=2
+3: StateReplicate match=3 next=6 score=100 inflight=2
+
+# The undelivered MsgApp messages are flushed now, only to confirm the
+# cluster is otherwise perfectly healthy -- this scenario is about heir
+# selection finding nobody, not about the cluster being broken.
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
+  1->2 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
+  1->3 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=true:
+  Entries:
+  1/4 EntryNormal "foo"
+  1/5 EntryNormal "bar"
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgAppResp Term:1 Log:0/4
+  2->1 MsgAppResp Term:1 Log:0/5
+> 3 handling Ready
+  Ready MustSync=true:
+  Entries:
+  1/4 EntryNormal "foo"
+  1/5 EntryNormal "bar"
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgAppResp Term:1 Log:0/4
+  3->1 MsgAppResp Term:1 Log:0/5
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgAppResp Term:1 Log:0/4
+  2->1 MsgAppResp Term:1 Log:0/5
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgAppResp Term:1 Log:0/4
+  3->1 MsgAppResp Term:1 Log:0/5
+> 1 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:5
+  CommittedEntries:
+  1/4 EntryNormal "foo"
+  1/5 EntryNormal "bar"
+  Messages:
+  1->2 MsgApp Term:1 Log:1/5 Commit:3
+  1->2 MsgApp Term:1 Log:1/5 Commit:4
+  1->3 MsgApp Term:1 Log:1/5 Commit:4
+  1->2 MsgApp Term:1 Log:1/5 Commit:5
+  1->3 MsgApp Term:1 Log:1/5 Commit:5
+  1->3 MsgApp Term:1 Log:1/5 Commit:5
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/5 Commit:3
+  1->2 MsgApp Term:1 Log:1/5 Commit:4
+  1->2 MsgApp Term:1 Log:1/5 Commit:5
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/5 Commit:4
+  1->3 MsgApp Term:1 Log:1/5 Commit:5
+  1->3 MsgApp Term:1 Log:1/5 Commit:5
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:5
+  CommittedEntries:
+  1/4 EntryNormal "foo"
+  1/5 EntryNormal "bar"
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/5
+  2->1 MsgAppResp Term:1 Log:0/5
+  2->1 MsgAppResp Term:1 Log:0/5
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:5
+  CommittedEntries:
+  1/4 EntryNormal "foo"
+  1/5 EntryNormal "bar"
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/5
+  3->1 MsgAppResp Term:1 Log:0/5
+  3->1 MsgAppResp Term:1 Log:0/5
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/5
+  2->1 MsgAppResp Term:1 Log:0/5
+  2->1 MsgAppResp Term:1 Log:0/5
+  3->1 MsgAppResp Term:1 Log:0/5
+  3->1 MsgAppResp Term:1 Log:0/5
+  3->1 MsgAppResp Term:1 Log:0/5
+
+raft-state
+----
+1: StateLeader (Voter) Term:1 Lead:1
+2: StateFollower (Voter) Term:1 Lead:1
+3: StateFollower (Voter) Term:1 Lead:1

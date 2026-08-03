@@ -1,0 +1,428 @@
+# T6.2 (TASKS.md) -- DESIGN.md §3 degenerate-case table, row "Heir
+# partitioned with old leader's minority": the heir can't win a majority
+# from inside the minority side; the majority side, once its (backed-off,
+# heir-biased) timeout expires, elects independently via a vanilla-style
+# single-candidate campaign. Both halves are exercised in one file so the
+# "can't win" and "does win" outcomes are directly comparable.
+#
+# 5 voters so a genuine minority (2) vs majority (3) split exists: {1,2}
+# (old leader + heir) vs {3,4,5}. From the point the partition is imposed,
+# every `stabilize` call below is scoped to one side of the split only --
+# `Stabilize` (rafttest/interaction_env_handler_stabilize.go) delivers and
+# processes traffic only for the node IDs passed to it, so a message
+# addressed across the boundary is simply left sitting undelivered in the
+# queue -- but only until some *later* stabilize call happens to include
+# that recipient too, at which point it would be delivered after all
+# (Stabilize doesn't care when a message was queued, only who it's
+# addressed to). Since both sides get their own stabilize call later in
+# this file, any cross-partition message must be explicitly dropped via
+# deliver-msgs the moment it's generated, not just left unscoped -- an
+# earlier draft of this file skipped that and produced a false result
+# (the majority side silently granting a vote to the unreachable minority
+# candidate, from a stale queued message, before the majority's own
+# candidate ever got a chance).
+
+log-level error
+----
+ok
+
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=50
+----
+ok
+
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=255
+----
+ok
+
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=100
+----
+ok
+
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=90
+----
+ok
+
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=80
+----
+ok
+
+campaign 1
+----
+ok
+
+stabilize 1 2 3 4 5
+----
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  1->2 MsgVote Term:1 Log:1/2
+  1->3 MsgVote Term:1 Log:1/2
+  1->4 MsgVote Term:1 Log:1/2
+  1->5 MsgVote Term:1 Log:1/2
+> 2 receiving messages
+  1->2 MsgVote Term:1 Log:1/2
+> 3 receiving messages
+  1->3 MsgVote Term:1 Log:1/2
+> 4 receiving messages
+  1->4 MsgVote Term:1 Log:1/2
+> 5 receiving messages
+  1->5 MsgVote Term:1 Log:1/2
+> 2 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  2->1 MsgVoteResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  3->1 MsgVoteResp Term:1 Log:0/0
+> 4 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  4->1 MsgVoteResp Term:1 Log:0/0
+> 5 handling Ready
+  Ready MustSync=true:
+  HardState Term:1 Vote:1 Commit:2
+  Messages:
+  5->1 MsgVoteResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgVoteResp Term:1 Log:0/0
+  3->1 MsgVoteResp Term:1 Log:0/0
+  4->1 MsgVoteResp Term:1 Log:0/0
+  5->1 MsgVoteResp Term:1 Log:0/0
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateLeader
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+  1->4 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+  1->5 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 4 receiving messages
+  1->4 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 5 receiving messages
+  1->5 MsgApp Term:1 Log:1/2 Commit:2 Entries:[1/3 EntryNormal ""]
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 4 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  4->1 MsgAppResp Term:1 Log:0/3
+> 5 handling Ready
+  Ready MustSync=true:
+  Lead:1 State:StateFollower
+  Entries:
+  1/3 EntryNormal ""
+  Messages:
+  5->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+  4->1 MsgAppResp Term:1 Log:0/3
+  5->1 MsgAppResp Term:1 Log:0/3
+> 1 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+  1->4 MsgApp Term:1 Log:1/3 Commit:3
+  1->5 MsgApp Term:1 Log:1/3 Commit:3
+> 2 receiving messages
+  1->2 MsgApp Term:1 Log:1/3 Commit:3
+> 3 receiving messages
+  1->3 MsgApp Term:1 Log:1/3 Commit:3
+> 4 receiving messages
+  1->4 MsgApp Term:1 Log:1/3 Commit:3
+> 5 receiving messages
+  1->5 MsgApp Term:1 Log:1/3 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  2->1 MsgAppResp Term:1 Log:0/3
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  3->1 MsgAppResp Term:1 Log:0/3
+> 4 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  4->1 MsgAppResp Term:1 Log:0/3
+> 5 handling Ready
+  Ready MustSync=false:
+  HardState Term:1 Vote:1 Commit:3
+  CommittedEntries:
+  1/3 EntryNormal ""
+  Messages:
+  5->1 MsgAppResp Term:1 Log:0/3
+> 1 receiving messages
+  2->1 MsgAppResp Term:1 Log:0/3
+  3->1 MsgAppResp Term:1 Log:0/3
+  4->1 MsgAppResp Term:1 Log:0/3
+  5->1 MsgAppResp Term:1 Log:0/3
+
+# First heartbeat tick runs selection (id 2 wins on score 255) and announces
+# it to every node in this same round.
+tick-heartbeat 1
+----
+ok
+
+stabilize 1 2 3 4 5
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->4 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->5 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 4 receiving messages
+  1->4 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 5 receiving messages
+  1->5 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 4 handling Ready
+  Ready MustSync=false:
+  Messages:
+  4->1 MsgHeartbeatResp Term:1 Log:0/0
+> 5 handling Ready
+  Ready MustSync=false:
+  Messages:
+  5->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  4->1 MsgHeartbeatResp Term:1 Log:0/0
+  5->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=255
+3: StateReplicate match=3 next=4 score=100
+4: StateReplicate match=3 next=4 score=90
+5: StateReplicate match=3 next=4 score=80
+heir=2 churn=0
+
+# Partition begins here: {1,2} (old leader + heir) vs {3,4,5} (majority).
+# Node 1 keeps believing it's leader and keeps ticking/heartbeating -- it's
+# alive, just cut off -- but from here on no `stabilize` call ever spans
+# both sides again.
+
+# The heir's own biased timeout (electionTimeout + tiny jitter) fires within
+# one round, so it campaigns first, same as the happy-path crash case.
+tick-election 2
+----
+ok
+
+# Only the minority side is stabilized: 2's MsgVote reaches 1 (grants --
+# same log, hasn't voted this term).
+stabilize 1 2
+----
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:2 Vote:2 Commit:3
+  Messages:
+  2->1 MsgVote Term:2 Log:1/3
+  2->3 MsgVote Term:2 Log:1/3
+  2->4 MsgVote Term:2 Log:1/3
+  2->5 MsgVote Term:2 Log:1/3
+> 1 receiving messages
+  2->1 MsgVote Term:2 Log:1/3
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:2 Vote:2 Commit:3
+  Messages:
+  1->2 MsgVoteResp Term:2 Log:0/0
+> 2 receiving messages
+  1->2 MsgVoteResp Term:2 Log:0/0
+
+# 2's MsgVote copies addressed to 3/4/5 are still queued from the round
+# above -- drop them outright (genuinely lost in transit, not merely
+# delayed) so the majority's own stabilize call below can't accidentally
+# deliver a stale minority candidacy to the majority side (an earlier
+# draft of this file skipped this and produced a false result: 4 and 5
+# silently granting a vote to the unreachable minority candidate from this
+# leftover message, before the majority's own candidate ever got a
+# chance).
+deliver-msgs drop=(3,4,5)
+----
+dropped: 2->3 MsgVote Term:2 Log:1/3
+dropped: 2->4 MsgVote Term:2 Log:1/3
+dropped: 2->5 MsgVote Term:2 Log:1/3
+
+# 2 has only 2 of 5 votes (itself + 1) -- short of the 3-vote majority.
+# The heir cannot win from inside the minority.
+raft-state
+----
+1: StateFollower (Voter) Term:2 Lead:0
+2: StateCandidate (Voter) Term:2 Lead:0
+3: StateFollower (Voter) Term:1 Lead:1
+4: StateFollower (Voter) Term:1 Lead:1
+5: StateFollower (Voter) Term:1 Lead:1
+
+# Majority side: 3, 4 and 5 last heard from the leader before the
+# partition, when heir 2 was believed live, so their frozen
+# randomizedElectionTimeout is the backed-off (non-heir) value, not vanilla
+# -- ticking one round (3 ticks) must not be enough on its own. Only 3 is
+# advanced, matching the determinism trick used in heir_dead_fallback.txt
+# (2 rounds guarantees crossing the backoff range regardless of the random
+# draw, while never accumulating enough ticks toward a second, spurious
+# campaign).
+tick-election 3
+----
+ok
+
+tick-election 3
+----
+ok
+
+stabilize 3 4 5
+----
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:2 Vote:3 Commit:3
+  Messages:
+  3->1 MsgVote Term:2 Log:1/3
+  3->2 MsgVote Term:2 Log:1/3
+  3->4 MsgVote Term:2 Log:1/3
+  3->5 MsgVote Term:2 Log:1/3
+> 4 receiving messages
+  3->4 MsgVote Term:2 Log:1/3
+> 5 receiving messages
+  3->5 MsgVote Term:2 Log:1/3
+> 4 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:2 Vote:3 Commit:3
+  Messages:
+  4->3 MsgVoteResp Term:2 Log:0/0
+> 5 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:2 Vote:3 Commit:3
+  Messages:
+  5->3 MsgVoteResp Term:2 Log:0/0
+> 3 receiving messages
+  4->3 MsgVoteResp Term:2 Log:0/0
+  5->3 MsgVoteResp Term:2 Log:0/0
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:3 State:StateLeader
+  Entries:
+  2/4 EntryNormal ""
+  Messages:
+  3->1 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+  3->2 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+  3->4 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+  3->5 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+> 4 receiving messages
+  3->4 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+> 5 receiving messages
+  3->5 MsgApp Term:2 Log:1/3 Commit:3 Entries:[2/4 EntryNormal ""]
+> 4 handling Ready
+  Ready MustSync=true:
+  Lead:3 State:StateFollower
+  Entries:
+  2/4 EntryNormal ""
+  Messages:
+  4->3 MsgAppResp Term:2 Log:0/4
+> 5 handling Ready
+  Ready MustSync=true:
+  Lead:3 State:StateFollower
+  Entries:
+  2/4 EntryNormal ""
+  Messages:
+  5->3 MsgAppResp Term:2 Log:0/4
+> 3 receiving messages
+  4->3 MsgAppResp Term:2 Log:0/4
+  5->3 MsgAppResp Term:2 Log:0/4
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:3 Commit:4
+  CommittedEntries:
+  2/4 EntryNormal ""
+  Messages:
+  3->4 MsgApp Term:2 Log:2/4 Commit:4
+  3->5 MsgApp Term:2 Log:2/4 Commit:4
+> 4 receiving messages
+  3->4 MsgApp Term:2 Log:2/4 Commit:4
+> 5 receiving messages
+  3->5 MsgApp Term:2 Log:2/4 Commit:4
+> 4 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:3 Commit:4
+  CommittedEntries:
+  2/4 EntryNormal ""
+  Messages:
+  4->3 MsgAppResp Term:2 Log:0/4
+> 5 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:3 Commit:4
+  CommittedEntries:
+  2/4 EntryNormal ""
+  Messages:
+  5->3 MsgAppResp Term:2 Log:0/4
+> 3 receiving messages
+  4->3 MsgAppResp Term:2 Log:0/4
+  5->3 MsgAppResp Term:2 Log:0/4
+
+# The majority elects independently, without ever needing the minority's
+# participation -- exactly DESIGN.md's "vanilla election in majority side".
+raft-state
+----
+1: StateFollower (Voter) Term:2 Lead:0
+2: StateCandidate (Voter) Term:2 Lead:0
+3: StateLeader (Voter) Term:2 Lead:3
+4: StateFollower (Voter) Term:2 Lead:3
+5: StateFollower (Voter) Term:2 Lead:3
