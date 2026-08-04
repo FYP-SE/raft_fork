@@ -606,6 +606,17 @@ type raft struct {
 	knownHeir    uint64
 	heirSeenTick int
 
+	// heirRetries counts consecutive failed PreCandidate rounds this node
+	// has run while it believed itself the heir, since the last time it
+	// heard from a live leader (T7.2 finding, 2026-08-04 RESEARCH_LOG.md:
+	// a heir's PreVote can be lost to a single dropped packet with no
+	// response ever arriving; retrying at the same short deterministic
+	// window wastes a full cycle on every such loss). Consumed by
+	// resetRandomizedElectionTimeout to widen the heir's own jitter window
+	// per retry. Cleared in (*raft).reset and whenever electionElapsed is
+	// reset by hearing from an active leader (MsgApp/MsgHeartbeat below).
+	heirRetries int
+
 	// gracefulHandover, handoverThreshold, degradeWindow and handoverCooldown
 	// mirror the matching Config fields (DESIGN.md §2.6/§5). gracefulHandover
 	// gates whether maybeGracefulHandover does anything at all.
@@ -1040,6 +1051,7 @@ func (r *raft) reset(term uint64) {
 	r.heirTenure = 0
 	r.knownHeir = None
 	r.heirSeenTick = 0
+	r.heirRetries = 0
 	r.degradeTicks = 0
 	r.handoverCooldownRemaining = 0
 }
@@ -1192,6 +1204,21 @@ func (r *raft) becomePreCandidate() {
 	r.tick = r.tickElection
 	r.lead = None
 	r.state = StatePreCandidate
+
+	// becomePreCandidate does not call reset(), so unlike becomeCandidate
+	// a stalled PreCandidate round that retries (tickElection fires again
+	// because pastElectionTimeout was never satisfied by a quorum either
+	// way) normally reuses whatever randomizedElectionTimeout was last
+	// drawn. That's fine for vanilla Raft -- it's already a per-node
+	// random draw from [T,2T) -- but for a heir it's a near-deterministic
+	// short window, so a single dropped PreVote packet gets retried at the
+	// same short window with no widening (see heirRetries doc comment).
+	// Redraw with backoff here, heir path only.
+	if r.heirElection && r.currentHeir() == r.id {
+		r.heirRetries++
+		r.resetRandomizedElectionTimeout()
+	}
+
 	r.logger.Infof("%x became pre-candidate at term %d", r.id, r.Term)
 }
 
@@ -2013,6 +2040,10 @@ func stepFollower(r *raft, m *pb.Message) error {
 		// when HeirElection is on, to keep vanilla/disabled behaviour
 		// byte-identical (DESIGN.md §2.5, CLAUDE.md constraint 4).
 		if r.heirElection {
+			// A live leader means any prior campaign cycle is over --
+			// forget accumulated retry backoff so the next one starts
+			// fresh (see heirRetries doc comment).
+			r.heirRetries = 0
 			r.resetRandomizedElectionTimeout()
 		}
 	case pb.MsgHeartbeat:
@@ -2020,6 +2051,7 @@ func stepFollower(r *raft, m *pb.Message) error {
 		r.lead = m.GetFrom()
 		r.handleHeartbeat(m) // also updates knownHeir via recordHeir
 		if r.heirElection {
+			r.heirRetries = 0
 			r.resetRandomizedElectionTimeout()
 		}
 	case pb.MsgSnap:
@@ -2546,6 +2578,19 @@ func (r *raft) resetRandomizedElectionTimeout() {
 			delta := int(r.heirJitter * float64(r.electionTimeout))
 			if delta < 1 {
 				delta = 1
+			}
+			// Widen the jitter window linearly per consecutive failed
+			// campaign round (heirRetries, incremented in
+			// becomePreCandidate), capped at the vanilla worst case
+			// (electionTimeout-1, i.e. randomizedElectionTimeout never
+			// exceeds 2*electionTimeout-1) so heir bias can never make a
+			// retry slower than HeirElection being off (T7.2 finding,
+			// 2026-08-04 RESEARCH_LOG.md).
+			if r.heirRetries > 1 {
+				delta *= r.heirRetries
+				if maxDelta := r.electionTimeout - 1; delta > maxDelta {
+					delta = maxDelta
+				}
 			}
 			r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(delta)
 			return
