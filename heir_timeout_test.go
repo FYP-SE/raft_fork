@@ -35,7 +35,7 @@ func TestResetRandomizedElectionTimeout_HeirFiresFirst(t *testing.T) {
 	// with the implementation (see TestResetRandomizedElectionTimeout_HeirRangeBelowNonHeirRange
 	// for confirmation that the bound itself holds regardless).
 	r := newTimeoutTestRaft(t, 50, 1)
-	r.knownHeir = r.id // "I am the heir", and the belief is fresh (heirSeenTick=0)
+	r.knownHeir = r.id // "I am the heir"
 
 	minSeen, maxSeen := r.electionTimeout*10, 0
 	for i := 0; i < timeoutSamples; i++ {
@@ -65,7 +65,8 @@ func TestResetRandomizedElectionTimeout_HeirFiresFirst(t *testing.T) {
 
 func TestResetRandomizedElectionTimeout_NonHeirBacksOff(t *testing.T) {
 	r := newTimeoutTestRaft(t, 10, 1)
-	r.knownHeir = 2 // a live heir exists, and it isn't me (r.id == 1)
+	r.nonHeirBackoff = 1.5 // ablation setting; the default is 1.0 since D3
+	r.knownHeir = 2        // a live heir exists, and it isn't me (r.id == 1)
 
 	minSeen := r.electionTimeout * 10
 	maxSeen := 0
@@ -93,8 +94,11 @@ func TestResetRandomizedElectionTimeout_HeirRangeBelowNonHeirRange(t *testing.T)
 	// With the DESIGN.md §5 defaults (HeirJitter=0.1, NonHeirBackoff=1.5),
 	// every possible heir-branch draw must be strictly below every possible
 	// non-heir-branch draw, so the heir is structurally guaranteed to fire
-	// first (DESIGN.md §2.5's whole point).
+	// first (DESIGN.md §2.5's whole point). Only holds with the v1 backoff:
+	// since DESIGN_UPDATE.md D3 the default is 1.0, and D1's short heir
+	// timeout is what keeps the heir first.
 	r := newTimeoutTestRaft(t, 10, 1)
+	r.nonHeirBackoff = 1.5
 
 	r.knownHeir = r.id
 	heirMax := 0
@@ -130,16 +134,6 @@ func TestResetRandomizedElectionTimeout_NoAnnouncementIsVanilla(t *testing.T) {
 	assertVanillaDistribution(t, r)
 }
 
-// TestResetRandomizedElectionTimeout_StaleAnnouncementIsVanilla: a
-// previously-known heir whose announcement is older than HeirStaleness
-// heartbeat intervals must be treated exactly like "no heir known".
-func TestResetRandomizedElectionTimeout_StaleAnnouncementIsVanilla(t *testing.T) {
-	r := newTimeoutTestRaft(t, 10, 1)
-	r.knownHeir = 2
-	r.heirSeenTick = r.heirStaleness*r.heartbeatTimeout + 1 // just past the bound
-	assertVanillaDistribution(t, r)
-}
-
 func TestResetRandomizedElectionTimeout_DisabledIsVanilla(t *testing.T) {
 	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
 	// Explicit, not just left at newTestConfig's default: this test's premise
@@ -171,6 +165,9 @@ func TestStepFollower_RecomputesTimeoutOnAnnouncement(t *testing.T) {
 		cfg := newTestConfig(2, 50, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
 		cfg.StabilityScorer = stability.ConstScorer(0)
 		cfg.HeirElection = true
+		// v1 backoff pinned so the recompute is observable; the default is
+		// 1.0 (stock range) since DESIGN_UPDATE.md D3.
+		cfg.NonHeirBackoff = 1.5
 		r := newRaft(cfg)
 		r.becomeFollower(1, 1) // establish as a stable follower of leader 1, term 1
 		return r

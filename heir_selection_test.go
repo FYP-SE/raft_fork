@@ -250,7 +250,6 @@ func TestRaftReset_ClearsHeirSoftStateButNotChurn(t *testing.T) {
 	r.heirTenure = 7
 	r.heirChurn = 3
 	r.knownHeir = 9
-	r.heirSeenTick = 4
 
 	r.reset(r.Term + 1)
 
@@ -263,9 +262,6 @@ func TestRaftReset_ClearsHeirSoftStateButNotChurn(t *testing.T) {
 	if r.knownHeir != None {
 		t.Errorf("knownHeir = %d, want None after reset", r.knownHeir)
 	}
-	if r.heirSeenTick != 0 {
-		t.Errorf("heirSeenTick = %d, want 0 after reset", r.heirSeenTick)
-	}
 	if r.heirChurn != 3 {
 		t.Errorf("heirChurn = %d, want unchanged at 3 (cumulative metric, not soft state)", r.heirChurn)
 	}
@@ -273,8 +269,9 @@ func TestRaftReset_ClearsHeirSoftStateButNotChurn(t *testing.T) {
 
 func TestRaft_HeirStamp(t *testing.T) {
 	r := newHeirTestRaft(t)
-	if got := r.heirStamp(); got != nil {
-		t.Fatalf("heirStamp() = %v, want nil before any heir is selected", got)
+	// DESIGN_UPDATE.md D4: HeirElection on -> explicit 0, not nil.
+	if got := r.heirStamp(); got == nil || *got != 0 {
+		t.Fatalf("heirStamp() = %v, want pointer to 0 before any heir is selected", got)
 	}
 	r.heir = 2
 	got := r.heirStamp()
@@ -298,19 +295,10 @@ func TestRaft_RecordHeirAndCurrentHeir(t *testing.T) {
 	if r.knownHeir != 3 {
 		t.Fatalf("knownHeir = %d, want 3", r.knownHeir)
 	}
-	if r.heirSeenTick != 0 {
-		t.Fatalf("heirSeenTick = %d, want 0 right after an announcement", r.heirSeenTick)
-	}
 	if got := r.currentHeir(); got != 3 {
-		t.Fatalf("currentHeir() = %d, want 3 (fresh announcement)", got)
+		t.Fatalf("currentHeir() = %d, want 3", got)
 	}
-
-	// heirStaleness defaults to 4 heartbeat intervals; heartbeatTimeout is 1
-	// tick here, so exceeding 4 ticks since the last announcement must expire it.
-	r.heirSeenTick = r.heirStaleness*r.heartbeatTimeout + 1
-	if got := r.currentHeir(); got != None {
-		t.Fatalf("currentHeir() = %d, want None once the staleness bound is exceeded", got)
-	}
+	// No tick-based expiry any more: see heir_term_persistence_test.go.
 }
 
 func TestRaft_RecordHeirIgnoresAbsentField(t *testing.T) {
@@ -318,12 +306,11 @@ func TestRaft_RecordHeirIgnoresAbsentField(t *testing.T) {
 	r := newRaft(cfg)
 	r.becomeFollower(1, 1)
 	r.knownHeir = 5
-	r.heirSeenTick = 2
 
 	r.recordHeir(&pb.Message{}) // no Heir field set at all
 
-	if r.knownHeir != 5 || r.heirSeenTick != 2 {
-		t.Fatalf("recordHeir must be a no-op when m.Heir is nil, got knownHeir=%d heirSeenTick=%d", r.knownHeir, r.heirSeenTick)
+	if r.knownHeir != 5 {
+		t.Fatalf("recordHeir must be a no-op when m.Heir is nil, got knownHeir=%d", r.knownHeir)
 	}
 }
 

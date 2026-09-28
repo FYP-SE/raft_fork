@@ -334,14 +334,11 @@ type Config struct {
 	// (0,1]. Default: 0.1.
 	HeirJitter float64
 	// NonHeirBackoff is the multiplier non-heirs apply to their randomized
-	// election timeout when a live heir is known (T4.5: backoff*T +
-	// rand(T)), so the heir fires first. Must be in [1,2] per DESIGN.md
-	// §2.5. Default: 1.5.
+	// election timeout when a live heir is known (backoff*T + rand(T)).
+	// Must be in [1,2]. Default: 1.0, i.e. exactly stock's [T, 2T), so a
+	// failed heir falls back to stock timing (DESIGN_UPDATE.md D3); values
+	// above 1 are for ablation only.
 	NonHeirBackoff float64
-	// HeirStaleness is how many heartbeat intervals a heir announcement
-	// remains valid without a refresh before it's treated as stale (falling
-	// back to vanilla timeout behaviour). Default: 4.
-	HeirStaleness int
 	// HandoverThreshold is the leader's own score (out of 255) below which,
 	// sustained for DegradeWindow ticks, a graceful handover is considered.
 	// Default: 64.
@@ -435,14 +432,9 @@ func (c *Config) validateHeirRaft() error {
 		return errors.New("HeirJitter must be in (0,1]")
 	}
 	if c.NonHeirBackoff == 0 {
-		c.NonHeirBackoff = 1.5
+		c.NonHeirBackoff = 1.0
 	} else if c.NonHeirBackoff < 1 || c.NonHeirBackoff > 2 {
 		return errors.New("NonHeirBackoff must be in [1,2]")
-	}
-	if c.HeirStaleness == 0 {
-		c.HeirStaleness = 4
-	} else if c.HeirStaleness < 0 {
-		return errors.New("HeirStaleness must be >= 0")
 	}
 	if c.HandoverThreshold == 0 {
 		c.HandoverThreshold = 64
@@ -570,10 +562,6 @@ type raft struct {
 	maxHeirLag       uint64
 	hysteresisMargin uint8
 	minHeirTenure    int
-	// heirStaleness mirrors Config.HeirStaleness (DESIGN.md §2.4/§2.5):
-	// follower-side bound, in heartbeat intervals, after which a stale heir
-	// announcement is no longer trusted (see currentHeir).
-	heirStaleness int
 	// heirJitter and nonHeirBackoff mirror Config.HeirJitter/NonHeirBackoff
 	// (DESIGN.md §2.5, §5): the three-way randomizedElectionTimeout rule in
 	// resetRandomizedElectionTimeout consumes these directly.
@@ -599,12 +587,11 @@ type raft struct {
 	// NOT reset in (*raft).reset.
 	gracefulHandoverCount uint64
 
-	// knownHeir and heirSeenTick are follower-side soft state recording the
-	// leader's last announcement (DESIGN.md §2.4): who the heir is, and how
-	// many ticks ago that was last confirmed. Both cleared in (*raft).reset
-	// on term change. See currentHeir for the staleness-aware read.
-	knownHeir    uint64
-	heirSeenTick int
+	// knownHeir is follower-side soft state: the heir the leader last
+	// announced (DESIGN.md §2.4). Valid for the whole term -- cleared in
+	// (*raft).reset on term change, or by the leader announcing another heir
+	// or an explicit 0. No tick-based expiry (DESIGN_UPDATE.md D4).
+	knownHeir uint64
 
 	// heirRetries counts consecutive failed PreCandidate rounds this node
 	// has run while it believed itself the heir, since the last time it
@@ -676,7 +663,6 @@ func newRaft(c *Config) *raft {
 		maxHeirLag:                  c.MaxHeirLag,
 		hysteresisMargin:            c.HysteresisMargin,
 		minHeirTenure:               c.MinHeirTenure,
-		heirStaleness:               c.HeirStaleness,
 		heirJitter:                  c.HeirJitter,
 		nonHeirBackoff:              c.NonHeirBackoff,
 		gracefulHandover:            c.GracefulHandover,
@@ -1020,6 +1006,19 @@ func (r *raft) reset(term uint64) {
 	}
 	r.lead = None
 
+	// HeirRaft soft state (DESIGN.md §2.3/§2.4): both the leader's designated
+	// heir and a follower's belief about who the heir is are lost on every
+	// term change. heirChurn is deliberately left untouched -- it's a
+	// cumulative metric, not soft state. Cleared BEFORE the timeout draw
+	// below, so the new term's timeout never uses the old term's heir
+	// (DESIGN_UPDATE.md D4 follow-up, 2026-09-28).
+	r.heir = None
+	r.heirTenure = 0
+	r.knownHeir = None
+	r.heirRetries = 0
+	r.degradeTicks = 0
+	r.handoverCooldownRemaining = 0
+
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.resetRandomizedElectionTimeout()
@@ -1043,17 +1042,6 @@ func (r *raft) reset(term uint64) {
 	r.uncommittedSize = 0
 	r.readOnly = newReadOnly(r.readOnly.option)
 
-	// HeirRaft soft state (DESIGN.md §2.3/§2.4): both the leader's designated
-	// heir and a follower's belief about who the heir is are lost on every
-	// term change. heirChurn is deliberately left untouched -- it's a
-	// cumulative metric, not soft state.
-	r.heir = None
-	r.heirTenure = 0
-	r.knownHeir = None
-	r.heirSeenTick = 0
-	r.heirRetries = 0
-	r.degradeTicks = 0
-	r.handoverCooldownRemaining = 0
 }
 
 func (r *raft) appendEntry(es ...*pb.Entry) (accepted bool) {
@@ -1096,7 +1084,6 @@ func (r *raft) appendEntry(es ...*pb.Entry) (accepted bool) {
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
 	r.electionElapsed++
-	r.heirSeenTick++
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
@@ -2119,11 +2106,12 @@ func (r *raft) stabilityStamp() *uint32 {
 }
 
 // heirStamp returns the leader's currently designated heir to attach to an
-// outgoing MsgHeartbeat/MsgApp, or nil if none is designated. nil (rather
-// than a zero ID) keeps the message wire-identical to stock when
-// HeirElection is off, since r.heir then never leaves None (DESIGN.md §2.4).
+// outgoing MsgHeartbeat/MsgApp. With HeirElection on it is always set, and
+// an explicit 0 when there is no heir, so followers drop a heir the leader
+// dropped (DESIGN_UPDATE.md D4). With HeirElection off it is nil, keeping
+// the message wire-identical to stock (DESIGN.md §2.4).
 func (r *raft) heirStamp() *uint64 {
-	if r.heir == None {
+	if !r.heirElection {
 		return nil
 	}
 	return new(r.heir)
@@ -2269,25 +2257,18 @@ func (r *raft) maybeGracefulHandover() {
 
 // recordHeir updates follower-side soft state from an incoming
 // MsgHeartbeat/MsgApp's Heir field (DESIGN.md §2.4). A nil field (HeirElection
-// off, or an old-version leader) leaves existing state untouched.
+// off, or an old-version leader) leaves existing state untouched; an
+// explicit 0 clears it.
 func (r *raft) recordHeir(m *pb.Message) {
 	if m.Heir == nil {
 		return
 	}
 	r.knownHeir = m.GetHeir()
-	r.heirSeenTick = 0
 }
 
-// currentHeir returns the follower's belief about the live heir, or None if
-// no heir is known or the last announcement is older than HeirStaleness
-// heartbeat intervals (DESIGN.md §2.4/§2.5 hint expiry).
+// currentHeir returns the follower's belief about the heir for this term,
+// or None if none is known (DESIGN_UPDATE.md D4: no tick-based expiry).
 func (r *raft) currentHeir() uint64 {
-	if r.knownHeir == None {
-		return None
-	}
-	if r.heirSeenTick > r.heirStaleness*r.heartbeatTimeout {
-		return None
-	}
 	return r.knownHeir
 }
 
@@ -2560,9 +2541,8 @@ func (r *raft) pastElectionTimeout() bool {
 // resetRandomizedElectionTimeout draws this node's next randomized election
 // timeout. Vanilla Raft always draws uniformly from
 // [electionTimeout, 2*electionTimeout). HeirRaft (DESIGN.md §2.5) biases the
-// draw by this node's belief about the live heir, read via currentHeir
-// (which is itself staleness-aware, so a heir hint older than HeirStaleness
-// heartbeat intervals falls through to the vanilla case below):
+// draw by this node's belief about the heir for this term, read via
+// currentHeir:
 //
 //   - This node believes it is the heir: fires first, almost deterministically
 //     (electionTimeout + a small jitter).

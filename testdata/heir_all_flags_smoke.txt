@@ -1,3 +1,8 @@
+# Pinned to non-heir-backoff=1.5 (the v1 default): this file tests v1's
+# "non-heirs back off so the heir fires first" ordering. Since
+# DESIGN_UPDATE.md D3 the default is 1.0 (stock timers), which only keeps
+# the heir first once D1's short heir timeout lands.
+
 # T4.8 (TASKS.md) -- "all HeirRaft flags ON" interaction smoke test. Turning
 # every flag on for every pre-existing golden file isn't feasible (see
 # heir_conformance_test.go and RESEARCH_LOG.md 2026-07-21 for why: exact
@@ -14,19 +19,19 @@ log-level error
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true degrade-window=2 mutable-stability-score=200
+add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true degrade-window=2 mutable-stability-score=200 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true stability-score=255
+add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true stability-score=255 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true stability-score=150
+add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true stability-score=150 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true stability-score=100
+add-nodes 1 voters=(1,2,3,4) index=2 heir-election=true heir-log-priority=true graceful-handover=true stability-score=100 non-heir-backoff=1.5
 ----
 ok
 

@@ -17,6 +17,7 @@ package rafttest
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/cockroachdb/datadriven"
@@ -94,6 +95,17 @@ func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) e
 				cfg.HysteresisMargin = uint8(margin)
 			case "min-heir-tenure":
 				arg.Scan(t, i, &cfg.MinHeirTenure)
+			case "non-heir-backoff":
+				// DESIGN_UPDATE.md D3: default 1.0 (stock timers). Files that
+				// test v1's "non-heirs wait for the heir" ordering pin 1.5.
+				// Scanned as string: arg.Scan has no float64 support.
+				var v string
+				arg.Scan(t, i, &v)
+				f, err := strconv.ParseFloat(v, 64)
+				if err != nil {
+					return err
+				}
+				cfg.NonHeirBackoff = f
 			case "heir-log-priority":
 				// T4.7 (TASKS.md): send to the heir first in bcastAppend
 				// (DESIGN.md §2.7).

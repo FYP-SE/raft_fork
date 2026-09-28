@@ -46,8 +46,7 @@ func TestConfig_ValidateFillsTunableDefaults(t *testing.T) {
 	wantHysteresisMargin := uint8(20)
 	wantMinHeirTenure := 10
 	wantHeirJitter := 0.1
-	wantNonHeirBackoff := 1.5
-	wantHeirStaleness := 4
+	wantNonHeirBackoff := 1.0 // DESIGN_UPDATE.md D3
 	wantHandoverThreshold := uint8(64)
 	wantDegradeWindow := 5
 	wantHandoverCooldown := 10
@@ -66,9 +65,6 @@ func TestConfig_ValidateFillsTunableDefaults(t *testing.T) {
 	}
 	if cfg.NonHeirBackoff != wantNonHeirBackoff {
 		t.Errorf("NonHeirBackoff = %v, want default %v", cfg.NonHeirBackoff, wantNonHeirBackoff)
-	}
-	if cfg.HeirStaleness != wantHeirStaleness {
-		t.Errorf("HeirStaleness = %d, want default %d", cfg.HeirStaleness, wantHeirStaleness)
 	}
 	if cfg.HandoverThreshold != wantHandoverThreshold {
 		t.Errorf("HandoverThreshold = %d, want default %d", cfg.HandoverThreshold, wantHandoverThreshold)
@@ -122,7 +118,6 @@ func TestConfig_ValidateRejectsBadTunables(t *testing.T) {
 		"HeirJitter negative":    func(c *Config) { c.HeirJitter = -0.1 },
 		"HeirJitter above 1":     func(c *Config) { c.HeirJitter = 1.5 },
 		"MinHeirTenure negative": func(c *Config) { c.MinHeirTenure = -1 },
-		"HeirStaleness negative": func(c *Config) { c.HeirStaleness = -1 },
 		"DegradeWindow negative": func(c *Config) { c.DegradeWindow = -1 },
 		"HandoverCooldown negative": func(c *Config) { c.HandoverCooldown = -1 },
 	}

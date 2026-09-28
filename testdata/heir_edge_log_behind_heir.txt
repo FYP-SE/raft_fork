@@ -294,11 +294,13 @@ raft-state
 
 # 3 also saw 2's higher-term vote request, so it stepped down to that same
 # term and, per T4.4, had its own heir belief cleared on that term bump --
-# from here on 3 uses a vanilla timeout, not the backed-off one. Two full
-# rounds guarantees crossing the vanilla range regardless of the random
-# draw (same margin used in heir_dead_fallback.txt), without risking a
-# second, spurious campaign.
-tick-election 3
+# from here on 3 uses a vanilla timeout, not the backed-off one. Its draw is
+# pinned to the vanilla minimum so exactly one round fires it exactly once.
+# (This used to tick two rounds unpinned. That was only safe because
+# reset() drew the new term's timeout with the OLD term's heir belief, i.e.
+# the 1.5x backoff; fixed 2026-09-28. With a real vanilla draw, two rounds
+# can fire a second, spurious campaign.)
+set-randomized-election-timeout 3 timeout=3
 ----
 ok
 

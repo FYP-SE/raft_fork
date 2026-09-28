@@ -1,3 +1,8 @@
+# Pinned to non-heir-backoff=1.5 (the v1 default): this file tests v1's
+# "non-heirs back off so the heir fires first" ordering. Since
+# DESIGN_UPDATE.md D3 the default is 1.0 (stock timers), which only keeps
+# the heir first once D1's short heir timeout lands.
+
 # T4.5 (TASKS.md) -- crash-path biased election timeouts, happy path
 # (DESIGN.md §2.5). The leader crashes; the heir (highest stability score,
 # announced via T4.4) times out first and wins the election in a single
@@ -19,15 +24,15 @@ ok
 
 # Cluster A: no PreVote. id 1 will be leader; id 2 is the highest scorer
 # (255) and becomes heir; id 3 is a lower-scoring, ordinary follower.
-add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=255
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=255 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=100
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=100 non-heir-backoff=1.5
 ----
 ok
 
@@ -252,15 +257,15 @@ raft-state
 # allowed, not when tickElection's timeout fires in the first place. Every
 # stabilize call below is scoped to 4 5 6 only, so cluster A's leftover
 # undelivered messages (node 1's queue) are never touched.
-add-nodes 1 voters=(4,5,6) index=2 heir-election=true stability-score=50 prevote=true
+add-nodes 1 voters=(4,5,6) index=2 heir-election=true stability-score=50 prevote=true non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(4,5,6) index=2 heir-election=true stability-score=255 prevote=true
+add-nodes 1 voters=(4,5,6) index=2 heir-election=true stability-score=255 prevote=true non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(4,5,6) index=2 heir-election=true stability-score=100 prevote=true
+add-nodes 1 voters=(4,5,6) index=2 heir-election=true stability-score=100 prevote=true non-heir-backoff=1.5
 ----
 ok
 

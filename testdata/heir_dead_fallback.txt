@@ -1,3 +1,8 @@
+# Pinned to non-heir-backoff=1.5 (the v1 default): this file tests v1's
+# "non-heirs back off so the heir fires first" ordering. Since
+# DESIGN_UPDATE.md D3 the default is 1.0 (stock timers), which only keeps
+# the heir first once D1's short heir timeout lands.
+
 # T4.5 (TASKS.md) -- crash-path biased election timeouts, double-failure
 # fallback (DESIGN.md §2.5/§3): the leader AND the heir both crash. The
 # remaining non-heir followers must still elect eventually via their
@@ -36,23 +41,23 @@ log-level error
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=50
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=50 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=255
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=255 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=100
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=100 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=90
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=90 non-heir-backoff=1.5
 ----
 ok
 
-add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=80
+add-nodes 1 voters=(1,2,3,4,5) index=2 heir-election=true stability-score=80 non-heir-backoff=1.5
 ----
 ok
 
