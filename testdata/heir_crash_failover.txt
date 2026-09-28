@@ -529,7 +529,15 @@ tick-election 6
 ----
 ok
 
-tick-election 5
+# The heir fires on its short timeout (DESIGN_UPDATE.md D1: HeirTimeout
+# clamps to ElectionTick-1 = 2 here). Tick exactly 2 ticks, not a full
+# tick-election: a third tick could start a second, fast-retry PreVote
+# round before the first one's responses are delivered.
+tick-heartbeat 5
+----
+ok
+
+tick-heartbeat 5
 ----
 ok
 

@@ -41,13 +41,10 @@ func TestResetRandomizedElectionTimeout_HeirFiresFirst(t *testing.T) {
 	for i := 0; i < timeoutSamples; i++ {
 		r.resetRandomizedElectionTimeout()
 		got := r.randomizedElectionTimeout
-		if got < r.electionTimeout {
-			t.Fatalf("randomizedElectionTimeout = %d, want >= electionTimeout=%d", got, r.electionTimeout)
-		}
-		// Upper bound: electionTimeout + HeirJitter*electionTimeout (default
-		// HeirJitter=0.1), so strictly less than the vanilla/non-heir minimum.
-		if maxAllowed := r.electionTimeout + int(0.1*float64(r.electionTimeout)) + 1; got > maxAllowed {
-			t.Fatalf("randomizedElectionTimeout = %d, want <= %d (heir jitter bound)", got, maxAllowed)
+		// DESIGN_UPDATE.md D1: [heirTimeout, heirTimeout + jitter], jitter =
+		// HeirJitter*ET (0.1*50 = 5), strictly below electionTimeout.
+		if got < r.heirTimeout || got > r.heirTimeout+5 || got >= r.electionTimeout {
+			t.Fatalf("randomizedElectionTimeout = %d, want in [%d,%d] (heir draw)", got, r.heirTimeout, r.heirTimeout+5)
 		}
 		if got < minSeen {
 			minSeen = got
@@ -178,9 +175,9 @@ func TestStepFollower_RecomputesTimeoutOnAnnouncement(t *testing.T) {
 		if err := r.Step(&pb.Message{Type: pb.MsgHeartbeat.Enum(), From: new(uint64(1)), Term: new(r.Term), Heir: new(r.id)}); err != nil {
 			t.Fatal(err)
 		}
-		maxAllowed := r.electionTimeout + int(0.1*float64(r.electionTimeout)) + 1
-		if got := r.randomizedElectionTimeout; got < r.electionTimeout || got > maxAllowed {
-			t.Fatalf("randomizedElectionTimeout = %d, want in [%d,%d] after learning self is heir", got, r.electionTimeout, maxAllowed)
+		// DESIGN_UPDATE.md D1: a short heir draw, below electionTimeout.
+		if got := r.randomizedElectionTimeout; got < r.heirTimeout || got >= r.electionTimeout {
+			t.Fatalf("randomizedElectionTimeout = %d, want in [%d,%d) after learning self is heir", got, r.heirTimeout, r.electionTimeout)
 		}
 	})
 

@@ -348,9 +348,15 @@ type Config struct {
 	// challenger (churn control; ineligibility still forces replacement
 	// immediately). Default: 10.
 	MinHeirTenure int
-	// HeirJitter is the heir's own randomized-timeout jitter, as a fraction
-	// of electionTimeout (heir fires at T + rand(HeirJitter*T)). Must be in
-	// (0,1]. Default: 0.1.
+	// HeirTimeout is the heir's election timeout in ticks, before jitter
+	// (DESIGN_UPDATE.md D1). With HeirElection on it must satisfy
+	// 2 <= HeirTimeout < ElectionTick and HeirTimeout > HeartbeatTick.
+	// Default: 3, clamped to ElectionTick-1 for small election timeouts.
+	HeirTimeout int
+	// HeirJitter is the heir's jitter as a fraction of ElectionTick,
+	// rounded down but never below 1 tick: the heir draws
+	// HeirTimeout + rand[0, jitter] ticks, capped below ElectionTick. Must
+	// be in (0,1]. Default: 0.1 (one tick at ElectionTick=10).
 	HeirJitter float64
 	// NonHeirBackoff is the multiplier non-heirs apply to their randomized
 	// election timeout when a live heir is known (backoff*T + rand(T)).
@@ -451,6 +457,22 @@ func (c *Config) validateHeirRaft() error {
 		c.MinHeirTenure = 10
 	} else if c.MinHeirTenure < 0 {
 		return errors.New("MinHeirTenure must be >= 0")
+	}
+	if c.HeirTimeout == 0 {
+		c.HeirTimeout = 3
+		if c.HeirTimeout > c.ElectionTick-1 {
+			c.HeirTimeout = c.ElectionTick - 1
+		}
+	}
+	if c.HeirElection {
+		if c.HeirTimeout < 2 || c.HeirTimeout >= c.ElectionTick {
+			return errors.New("HeirTimeout must be in [2, ElectionTick)")
+		}
+		if c.HeirTimeout <= c.HeartbeatTick {
+			return errors.New("HeirTimeout must be greater than HeartbeatTick")
+		}
+	} else if c.HeirTimeout < 0 {
+		return errors.New("HeirTimeout must be >= 0")
 	}
 	if c.HeirJitter == 0 {
 		c.HeirJitter = 0.1
@@ -595,6 +617,14 @@ type raft struct {
 	// resetRandomizedElectionTimeout consumes these directly.
 	heirJitter     float64
 	nonHeirBackoff float64
+	// heirTimeout mirrors Config.HeirTimeout (DESIGN_UPDATE.md D1).
+	heirTimeout int
+	// heirSilence counts ticks since this node last heard from a leader
+	// (MsgApp/MsgHeartbeat/MsgSnap) or changed term. Unlike electionElapsed
+	// it is NOT reset when this node starts a campaign round, so it bounds
+	// the heir window: the heir fast path applies only while
+	// heirSilence < electionTimeout (DESIGN_UPDATE.md D1/D4).
+	heirSilence int
 
 	// heir is this leader's currently designated successor (DESIGN.md §2.3).
 	// None when no eligible follower exists. Soft state: cleared in
@@ -625,17 +655,6 @@ type raft struct {
 	// reset). Followers' Progress.LastAckTick is stamped with it, so ack age
 	// is leaderTicks - LastAckTick (DESIGN_UPDATE.md D6).
 	leaderTicks uint64
-
-	// heirRetries counts consecutive failed PreCandidate rounds this node
-	// has run while it believed itself the heir, since the last time it
-	// heard from a live leader (T7.2 finding, 2026-08-04 RESEARCH_LOG.md:
-	// a heir's PreVote can be lost to a single dropped packet with no
-	// response ever arriving; retrying at the same short deterministic
-	// window wastes a full cycle on every such loss). Consumed by
-	// resetRandomizedElectionTimeout to widen the heir's own jitter window
-	// per retry. Cleared in (*raft).reset and whenever electionElapsed is
-	// reset by hearing from an active leader (MsgApp/MsgHeartbeat below).
-	heirRetries int
 
 	// gracefulHandover, handoverThreshold, degradeWindow and handoverCooldown
 	// mirror the matching Config fields (DESIGN.md §2.6/§5). gracefulHandover
@@ -698,6 +717,7 @@ func newRaft(c *Config) *raft {
 		hysteresisMargin:            c.HysteresisMargin,
 		minHeirTenure:               c.MinHeirTenure,
 		heirJitter:                  c.HeirJitter,
+		heirTimeout:                 c.HeirTimeout,
 		nonHeirBackoff:              c.NonHeirBackoff,
 		gracefulHandover:            c.GracefulHandover,
 		handoverThreshold:           c.HandoverThreshold,
@@ -1049,7 +1069,7 @@ func (r *raft) reset(term uint64) {
 	r.heir = None
 	r.heirTenure = 0
 	r.knownHeir = None
-	r.heirRetries = 0
+	r.heirSilence = 0
 	r.degradeTicks = 0
 	r.handoverCooldownRemaining = 0
 
@@ -1118,6 +1138,7 @@ func (r *raft) appendEntry(es ...*pb.Entry) (accepted bool) {
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
 	r.electionElapsed++
+	r.heirSilence++
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
@@ -1227,17 +1248,12 @@ func (r *raft) becomePreCandidate() {
 	r.lead = None
 	r.state = StatePreCandidate
 
-	// becomePreCandidate does not call reset(), so unlike becomeCandidate
-	// a stalled PreCandidate round that retries (tickElection fires again
-	// because pastElectionTimeout was never satisfied by a quorum either
-	// way) normally reuses whatever randomizedElectionTimeout was last
-	// drawn. That's fine for vanilla Raft -- it's already a per-node
-	// random draw from [T,2T) -- but for a heir it's a near-deterministic
-	// short window, so a single dropped PreVote packet gets retried at the
-	// same short window with no widening (see heirRetries doc comment).
-	// Redraw with backoff here, heir path only.
+	// becomePreCandidate does not call reset(), so a PreCandidate round
+	// that stalls would otherwise retry on whatever timeout was last drawn.
+	// The heir redraws each round instead: another short heir draw while
+	// inside the heir window (DESIGN_UPDATE.md D1 fast retry), or the
+	// stock fallback once it has passed.
 	if r.heirElection && r.currentHeir() == r.id {
-		r.heirRetries++
 		r.resetRandomizedElectionTimeout()
 	}
 
@@ -2011,9 +2027,11 @@ func stepCandidate(r *raft, m *pb.Message) error {
 	case pb.MsgApp:
 		r.becomeFollower(m.GetTerm(), m.GetFrom()) // always m.Term == r.Term
 		r.handleAppendEntries(m)
+		r.redrawAfterHeirAnnouncement()
 	case pb.MsgHeartbeat:
 		r.becomeFollower(m.GetTerm(), m.GetFrom()) // always m.Term == r.Term
 		r.handleHeartbeat(m)
+		r.redrawAfterHeirAnnouncement()
 	case pb.MsgSnap:
 		r.becomeFollower(m.GetTerm(), m.GetFrom()) // always m.Term == r.Term
 		r.handleSnapshot(m)
@@ -2064,10 +2082,8 @@ func stepFollower(r *raft, m *pb.Message) error {
 		// when HeirElection is on, to keep vanilla/disabled behaviour
 		// byte-identical (DESIGN.md §2.5, CLAUDE.md constraint 4).
 		if r.heirElection {
-			// A live leader means any prior campaign cycle is over --
-			// forget accumulated retry backoff so the next one starts
-			// fresh (see heirRetries doc comment).
-			r.heirRetries = 0
+			// A live leader: the heir window starts over.
+			r.heirSilence = 0
 			r.resetRandomizedElectionTimeout()
 		}
 	case pb.MsgHeartbeat:
@@ -2075,12 +2091,13 @@ func stepFollower(r *raft, m *pb.Message) error {
 		r.lead = m.GetFrom()
 		r.handleHeartbeat(m) // also updates knownHeir via recordHeir
 		if r.heirElection {
-			r.heirRetries = 0
+			r.heirSilence = 0
 			r.resetRandomizedElectionTimeout()
 		}
 	case pb.MsgSnap:
 		r.electionElapsed = 0
 		r.lead = m.GetFrom()
+		r.heirSilence = 0
 		r.handleSnapshot(m)
 	case pb.MsgTransferLeader:
 		if r.lead == None {
@@ -2238,6 +2255,47 @@ func (r *raft) selectHeir() {
 		return
 	}
 	r.heirTenure++
+}
+
+// redrawAfterHeirAnnouncement recomputes the election timeout after a
+// (pre-)candidate falls back to follower on hearing the leader:
+// becomeFollower's reset() drew with the heir belief cleared, and
+// handleAppendEntries/handleHeartbeat then restored it from the message.
+// Without this a heir that campaigned during a brief leader pause (more
+// common with D1's short heir timeout) would run a stock timer until the
+// next heartbeat. No-op when HeirElection is off (byte-identical to stock).
+func (r *raft) redrawAfterHeirAnnouncement() {
+	if r.heirElection {
+		r.resetRandomizedElectionTimeout()
+	}
+}
+
+// heirDraw returns the heir's next randomized election timeout, counted
+// from now (electionElapsed is 0 at every draw site). DESIGN_UPDATE.md D1:
+//
+//   - Inside the heir window: heirTimeout + rand[0, jitter] ticks, jitter at
+//     least one tick, capped below electionTimeout -- as long as firing then
+//     still falls inside the window (heirSilence + draw < electionTimeout).
+//   - Otherwise the heir is an ordinary node: it fires at the total silence
+//     T a stock draw from [electionTimeout, 2*electionTimeout) gives, i.e.
+//     T - heirSilence ticks from now (at least 1). Its worst case therefore
+//     equals stock's instead of adding a full ET on top of the heir window.
+func (r *raft) heirDraw() int {
+	jitter := int(r.heirJitter * float64(r.electionTimeout))
+	if jitter < 1 {
+		jitter = 1
+	}
+	if maxJitter := r.electionTimeout - 1 - r.heirTimeout; jitter > maxJitter {
+		jitter = maxJitter
+	}
+	if d := r.heirTimeout + globalRand.Intn(jitter+1); r.heirSilence+d < r.electionTimeout {
+		return d
+	}
+	t := r.electionTimeout + globalRand.Intn(r.electionTimeout)
+	if d := t - r.heirSilence; d > 1 {
+		return d
+	}
+	return 1
 }
 
 // resolveFreshnessSlack maps a validated Config.FreshnessSlack to entries.
@@ -2617,24 +2675,7 @@ func (r *raft) resetRandomizedElectionTimeout() {
 	if r.heirElection {
 		switch heir := r.currentHeir(); {
 		case heir == r.id:
-			delta := int(r.heirJitter * float64(r.electionTimeout))
-			if delta < 1 {
-				delta = 1
-			}
-			// Widen the jitter window linearly per consecutive failed
-			// campaign round (heirRetries, incremented in
-			// becomePreCandidate), capped at the vanilla worst case
-			// (electionTimeout-1, i.e. randomizedElectionTimeout never
-			// exceeds 2*electionTimeout-1) so heir bias can never make a
-			// retry slower than HeirElection being off (T7.2 finding,
-			// 2026-08-04 RESEARCH_LOG.md).
-			if r.heirRetries > 1 {
-				delta *= r.heirRetries
-				if maxDelta := r.electionTimeout - 1; delta > maxDelta {
-					delta = maxDelta
-				}
-			}
-			r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(delta)
+			r.randomizedElectionTimeout = r.heirDraw()
 			return
 		case heir != None:
 			backoff := int(r.nonHeirBackoff * float64(r.electionTimeout))

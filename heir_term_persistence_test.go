@@ -12,9 +12,9 @@ import (
 // v1 expired a follower's knownHeir after HeirStaleness (4) heartbeat
 // intervals of silence from the leader: 400 ms at defaults, well before the
 // 1000 ms election timeout. So by the time a crashed leader's heir actually
-// campaigned it had already forgotten it was the heir, and the heirRetries
-// widening in becomePreCandidate (gated on currentHeir()==r.id) never ran
-// (2026-09-27 audit). D4 removes the tick expiry: knownHeir is valid until
+// campaigned it had already forgotten it was the heir, and the heir path in
+// becomePreCandidate (gated on currentHeir()==r.id) never ran (2026-09-27
+// audit). D4 removes the tick expiry: knownHeir is valid until
 // the term changes (reset) or the leader announces a different heir,
 // including an explicit heir=0 when it drops one.
 
@@ -48,8 +48,9 @@ func TestHeirPersistence_FollowerKeepsHeirThroughSilence(t *testing.T) {
 }
 
 // The heir itself still knows it is the heir when its timer fires, so its
-// PreCandidate round takes the heir path (heirRetries advances). This was
-// dead code in v1 because the belief had already expired.
+// PreCandidate round takes the heir path (it redraws a short heir timeout,
+// DESIGN_UPDATE.md D1). This was dead code in v1 because the belief had
+// already expired.
 func TestHeirPersistence_HeirStillHeirWhenItCampaigns(t *testing.T) {
 	r := newPersistenceTestRaft(t, 1)
 	r.recordHeir(newHeirMsg(1))
@@ -64,8 +65,8 @@ func TestHeirPersistence_HeirStillHeirWhenItCampaigns(t *testing.T) {
 	if got := r.currentHeir(); got != r.id {
 		t.Fatalf("currentHeir() = %d, want self (%d) at campaign time", got, r.id)
 	}
-	if r.heirRetries != 1 {
-		t.Fatalf("heirRetries = %d, want 1: the heir path in becomePreCandidate must run", r.heirRetries)
+	if got := r.randomizedElectionTimeout; got < r.heirTimeout || got >= r.electionTimeout {
+		t.Fatalf("randomizedElectionTimeout = %d after the round, want a heir redraw in [%d,%d)", got, r.heirTimeout, r.electionTimeout)
 	}
 }
 
