@@ -85,8 +85,12 @@ func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) e
 				// T4.4 (TASKS.md): enables leader-side heir selection +
 				// announcement (DESIGN.md §2.3/§2.4).
 				arg.Scan(t, i, &cfg.HeirElection)
-			case "max-heir-lag":
-				arg.Scan(t, i, &cfg.MaxHeirLag)
+			case "freshness-slack":
+				// DESIGN_UPDATE.md D5; -1 = raft.FreshnessSlackStrict (0).
+				arg.Scan(t, i, &cfg.FreshnessSlack)
+			case "heir-sync-grace":
+				// DESIGN_UPDATE.md D6, in ticks.
+				arg.Scan(t, i, &cfg.HeirSyncGrace)
 			case "hysteresis-margin":
 				// Scanned as int for the same reason as stability-score above
 				// (arg.Scan doesn't support uint8).

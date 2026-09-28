@@ -42,7 +42,6 @@ func TestConfig_ValidateFillsTunableDefaults(t *testing.T) {
 		t.Fatalf("validate(): %v", err)
 	}
 	// Defaults per DESIGN.md §5.
-	wantMaxHeirLag := uint64(256)
 	wantHysteresisMargin := uint8(20)
 	wantMinHeirTenure := 10
 	wantHeirJitter := 0.1
@@ -51,8 +50,11 @@ func TestConfig_ValidateFillsTunableDefaults(t *testing.T) {
 	wantDegradeWindow := 5
 	wantHandoverCooldown := 10
 
-	if cfg.MaxHeirLag != wantMaxHeirLag {
-		t.Errorf("MaxHeirLag = %d, want default %d", cfg.MaxHeirLag, wantMaxHeirLag)
+	if cfg.FreshnessSlack != 1 {
+		t.Errorf("FreshnessSlack = %d, want default 1", cfg.FreshnessSlack)
+	}
+	if cfg.HeirSyncGrace != cfg.ElectionTick {
+		t.Errorf("HeirSyncGrace = %d, want default ElectionTick (%d)", cfg.HeirSyncGrace, cfg.ElectionTick)
 	}
 	if cfg.HysteresisMargin != wantHysteresisMargin {
 		t.Errorf("HysteresisMargin = %d, want default %d", cfg.HysteresisMargin, wantHysteresisMargin)

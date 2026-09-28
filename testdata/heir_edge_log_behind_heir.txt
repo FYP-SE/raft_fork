@@ -1,5 +1,5 @@
 # T6.2 (TASKS.md) -- DESIGN.md §3 degenerate-case table, row "Heir is
-# log-behind at crash (lag bound was violated in flight)": the heir falls
+# log-behind at crash (freshness gate was violated in flight)": the heir falls
 # behind *after* being announced (the leader crashes before its next
 # heartbeat tick ever re-runs selection and would have demoted it), so it
 # still believes itself heir and campaigns first on the fast timeout -- but
@@ -7,15 +7,18 @@
 # vanilla candidate is subject to. A non-heir then times out and wins.
 # Safety intact throughout: nothing here touches vote-granting rules.
 #
-# max-heir-lag=1 makes the lag bound trivial to violate with a couple of
-# undelivered entries. min-heir-tenure=1 as in the other T6.2 files, so it
-# doesn't interfere with anything being tested here.
+# Since DESIGN_UPDATE.md D5 the heir must hold every committed entry and be
+# within freshness-slack=1 of the freshest follower; two entries committed
+# via 3 alone violate both. min-heir-tenure=1 as in the other T6.2 files, so
+# it doesn't interfere with anything being tested here. This is the
+# accepted known limit of D5: the gate is only checked once per heartbeat,
+# so a leader crash in between can still leave a stale heir.
 
 log-level error
 ----
 ok
 
-add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50 max-heir-lag=1 min-heir-tenure=1
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50 freshness-slack=1 min-heir-tenure=1
 ----
 ok
 
@@ -145,6 +148,62 @@ stabilize
   2->1 MsgHeartbeatResp Term:1 Log:0/0
   3->1 MsgHeartbeatResp Term:1 Log:0/0
 
+# DESIGN_UPDATE.md D5: a follower becomes heir after 3 of 5
+# in-sync samples (one per heartbeat), so two more rounds.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
 status 1
 ----
 1: StateReplicate match=3 next=4
@@ -243,7 +302,8 @@ stabilize 1 3
   3->1 MsgAppResp Term:1 Log:0/5
 
 # 2's Match is now 2 entries behind 3's and the leader's lastIndex -- past
-# max-heir-lag=1 -- but nobody has re-run selection to notice.
+# the freshness gate (2 behind the freshest follower and the commit index)
+# -- but nobody has re-run selection to notice.
 status 1
 ----
 1: StateReplicate match=5 next=6

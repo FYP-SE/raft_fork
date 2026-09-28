@@ -127,6 +127,19 @@ type Progress struct {
 	// requires this (a follower that has never reported is never a heir
 	// candidate, even with the zero-value StabilityScore).
 	ScoreReported bool
+
+	// HeirRaft in-sync tracking (DESIGN_UPDATE.md D5/D6), leader-side soft
+	// state reset with the rest of Progress on term change.
+	//
+	// LastAckTick is the leader's leaderTicks value at this follower's last
+	// MsgAppResp/MsgHeartbeatResp.
+	LastAckTick uint64
+	// HeirSyncHistory holds one bit per heartbeat-interval sample, newest in
+	// bit 0: 1 if the follower was in sync in that sample.
+	HeirSyncHistory uint8
+	// HeirOutOfSyncTicks is how long, in ticks, the follower has been
+	// continuously out of sync (0 while in sync).
+	HeirOutOfSyncTicks int
 }
 
 // ResetState moves the Progress into the specified State, resetting MsgAppFlowPaused,

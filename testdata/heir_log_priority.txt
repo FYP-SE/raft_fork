@@ -183,6 +183,78 @@ stabilize
   3->1 MsgHeartbeatResp Term:1 Log:0/0
   4->1 MsgHeartbeatResp Term:1 Log:0/0
 
+# DESIGN_UPDATE.md D5: a follower becomes heir after 3 of 5
+# in-sync samples (one per heartbeat), so two more rounds.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->4 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 4 receiving messages
+  1->4 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 4 handling Ready
+  Ready MustSync=false:
+  Messages:
+  4->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  4->1 MsgHeartbeatResp Term:1 Log:0/0
+
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->4 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 4 receiving messages
+  1->4 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 4 handling Ready
+  Ready MustSync=false:
+  Messages:
+  4->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  4->1 MsgHeartbeatResp Term:1 Log:0/0
+
 status 1
 ----
 1: StateReplicate match=3 next=4
@@ -422,6 +494,78 @@ stabilize
   6->5 MsgAppResp Term:1 Log:0/3
   7->5 MsgAppResp Term:1 Log:0/3
   8->5 MsgAppResp Term:1 Log:0/3
+
+tick-heartbeat 5
+----
+ok
+
+stabilize
+----
+> 5 handling Ready
+  Ready MustSync=false:
+  Messages:
+  5->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  5->7 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  5->8 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 6 receiving messages
+  5->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 7 receiving messages
+  5->7 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 8 receiving messages
+  5->8 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 6 handling Ready
+  Ready MustSync=false:
+  Messages:
+  6->5 MsgHeartbeatResp Term:1 Log:0/0
+> 7 handling Ready
+  Ready MustSync=false:
+  Messages:
+  7->5 MsgHeartbeatResp Term:1 Log:0/0
+> 8 handling Ready
+  Ready MustSync=false:
+  Messages:
+  8->5 MsgHeartbeatResp Term:1 Log:0/0
+> 5 receiving messages
+  6->5 MsgHeartbeatResp Term:1 Log:0/0
+  7->5 MsgHeartbeatResp Term:1 Log:0/0
+  8->5 MsgHeartbeatResp Term:1 Log:0/0
+
+# DESIGN_UPDATE.md D5: a follower becomes heir after 3 of 5
+# in-sync samples (one per heartbeat), so two more rounds.
+tick-heartbeat 5
+----
+ok
+
+stabilize
+----
+> 5 handling Ready
+  Ready MustSync=false:
+  Messages:
+  5->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  5->7 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  5->8 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 6 receiving messages
+  5->6 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 7 receiving messages
+  5->7 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 8 receiving messages
+  5->8 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 6 handling Ready
+  Ready MustSync=false:
+  Messages:
+  6->5 MsgHeartbeatResp Term:1 Log:0/0
+> 7 handling Ready
+  Ready MustSync=false:
+  Messages:
+  7->5 MsgHeartbeatResp Term:1 Log:0/0
+> 8 handling Ready
+  Ready MustSync=false:
+  Messages:
+  8->5 MsgHeartbeatResp Term:1 Log:0/0
+> 5 receiving messages
+  6->5 MsgHeartbeatResp Term:1 Log:0/0
+  7->5 MsgHeartbeatResp Term:1 Log:0/0
+  8->5 MsgHeartbeatResp Term:1 Log:0/0
 
 tick-heartbeat 5
 ----

@@ -1,24 +1,23 @@
 # T6.2 (TASKS.md) -- DESIGN.md §3 degenerate-case table, row "No eligible
-# heir (all unstable/lagging)": every follower fails the eligibility gate
-# at selection time, so selectHeir finds nothing, no announcement goes out,
-# and every node's timeout falls back to the plain vanilla formula --
-# stock Raft, byte-for-byte, even though HeirElection is on.
+# heir (all unstable/lagging)", rewritten for DESIGN_UPDATE.md D5/D6
+# (2026-09-28). The v1 version made every follower fail max-heir-lag; that
+# bound is gone, and D5 measures freshness against the freshest follower,
+# so equally-behind followers are all in sync.
 #
-# max-heir-lag=1 on the leader makes the lag gate trivial to fail: two
-# proposals are flushed into the leader's own log (bumping lastIndex by 2)
-# but deliberately never delivered to either follower before the heartbeat
-# tick runs selection, so both followers' Match still sits two entries
-# behind -- lag=2 > max-heir-lag=1 for both, simultaneously. (Not
-# max-heir-lag=0: Config.validate(), raft.go:421-422, treats a zero
-# MaxHeirLag as "unset" and silently defaults it to 256, same as every
-# other zero-value tunable in this Config -- passing 0 here would leave
-# the real bound at 256 and every lag in this test comfortably eligible.)
+# Here a heir is selected normally, then every follower goes silent (all
+# messages to them dropped). With ElectionTick=3 and the default
+# heir-sync-grace (= ElectionTick), a follower is in sync while its last
+# ack is at most 3 ticks old, and the heir is dropped once it has been out
+# of sync for 3 more ticks: at ack age 6. Nobody else is in sync either, so
+# the leader has no heir and every node falls back to stock timers (D3).
+# After the partition heals, a heir comes back only after the D5 warm-up
+# (3 of 5 in-sync samples).
 
 log-level error
 ----
 ok
 
-add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50 max-heir-lag=1
+add-nodes 1 voters=(1,2,3) index=2 heir-election=true stability-score=50
 ----
 ok
 
@@ -119,56 +118,11 @@ stabilize
   2->1 MsgAppResp Term:1 Log:0/3
   3->1 MsgAppResp Term:1 Log:0/3
 
-# Both followers fully caught up here (lag=0, passes max-heir-lag=1) --
-# this establishes the baseline before the lag is introduced.
-propose 1 foo
-----
-ok
-
-# Flush only the leader's own Ready (bumps its lastIndex and queues the
-# MsgApp to 2 and 3), without delivering anything -- both followers' Match
-# stays at the pre-propose index.
-process-ready 1
-----
-Ready MustSync=true:
-Entries:
-1/4 EntryNormal "foo"
-Messages:
-1->2 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
-1->3 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
-
-propose 1 bar
-----
-ok
-
-process-ready 1
-----
-Ready MustSync=true:
-Entries:
-1/5 EntryNormal "bar"
-Messages:
-1->2 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
-1->3 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
-
-# selectHeir runs synchronously inside this tick, against the lastIndex/
-# Match values as they stand right now: both followers are 2 entries
-# behind, past max-heir-lag=1. Neither is eligible.
+# Warm-up: three in-sync samples -> heir=2 (highest score).
 tick-heartbeat 1
 ----
 ok
 
-# No heir=/churn= line -- HeirElection is on, but nobody qualified, so
-# nothing was ever announced. Output is byte-identical to the
-# HeirElection=off case for exactly that reason.
-status 1
-----
-1: StateReplicate match=5 next=6
-2: StateReplicate match=3 next=6 score=255 inflight=2
-3: StateReplicate match=3 next=6 score=100 inflight=2
-
-# The undelivered MsgApp messages are flushed now, only to confirm the
-# cluster is otherwise perfectly healthy -- this scenario is about heir
-# selection finding nobody, not about the cluster being broken.
 stabilize
 ----
 > 1 handling Ready
@@ -177,86 +131,321 @@ stabilize
   1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
   1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
 > 2 receiving messages
-  1->2 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
-  1->2 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
   1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
 > 3 receiving messages
-  1->3 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryNormal "foo"]
-  1->3 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "bar"]
   1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
 > 2 handling Ready
-  Ready MustSync=true:
-  Entries:
-  1/4 EntryNormal "foo"
-  1/5 EntryNormal "bar"
+  Ready MustSync=false:
   Messages:
   2->1 MsgHeartbeatResp Term:1 Log:0/0
-  2->1 MsgAppResp Term:1 Log:0/4
-  2->1 MsgAppResp Term:1 Log:0/5
 > 3 handling Ready
-  Ready MustSync=true:
-  Entries:
-  1/4 EntryNormal "foo"
-  1/5 EntryNormal "bar"
+  Ready MustSync=false:
   Messages:
   3->1 MsgHeartbeatResp Term:1 Log:0/0
-  3->1 MsgAppResp Term:1 Log:0/4
-  3->1 MsgAppResp Term:1 Log:0/5
 > 1 receiving messages
   2->1 MsgHeartbeatResp Term:1 Log:0/0
-  2->1 MsgAppResp Term:1 Log:0/4
-  2->1 MsgAppResp Term:1 Log:0/5
   3->1 MsgHeartbeatResp Term:1 Log:0/0
-  3->1 MsgAppResp Term:1 Log:0/4
-  3->1 MsgAppResp Term:1 Log:0/5
+
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
 > 1 handling Ready
   Ready MustSync=false:
-  HardState Term:1 Vote:1 Commit:5
-  CommittedEntries:
-  1/4 EntryNormal "foo"
-  1/5 EntryNormal "bar"
   Messages:
-  1->2 MsgApp Term:1 Log:1/5 Commit:3
-  1->2 MsgApp Term:1 Log:1/5 Commit:4
-  1->3 MsgApp Term:1 Log:1/5 Commit:4
-  1->2 MsgApp Term:1 Log:1/5 Commit:5
-  1->3 MsgApp Term:1 Log:1/5 Commit:5
-  1->3 MsgApp Term:1 Log:1/5 Commit:5
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
 > 2 receiving messages
-  1->2 MsgApp Term:1 Log:1/5 Commit:3
-  1->2 MsgApp Term:1 Log:1/5 Commit:4
-  1->2 MsgApp Term:1 Log:1/5 Commit:5
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
 > 3 receiving messages
-  1->3 MsgApp Term:1 Log:1/5 Commit:4
-  1->3 MsgApp Term:1 Log:1/5 Commit:5
-  1->3 MsgApp Term:1 Log:1/5 Commit:5
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
 > 2 handling Ready
   Ready MustSync=false:
-  HardState Term:1 Vote:1 Commit:5
-  CommittedEntries:
-  1/4 EntryNormal "foo"
-  1/5 EntryNormal "bar"
   Messages:
-  2->1 MsgAppResp Term:1 Log:0/5
-  2->1 MsgAppResp Term:1 Log:0/5
-  2->1 MsgAppResp Term:1 Log:0/5
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
 > 3 handling Ready
   Ready MustSync=false:
-  HardState Term:1 Vote:1 Commit:5
-  CommittedEntries:
-  1/4 EntryNormal "foo"
-  1/5 EntryNormal "bar"
   Messages:
-  3->1 MsgAppResp Term:1 Log:0/5
-  3->1 MsgAppResp Term:1 Log:0/5
-  3->1 MsgAppResp Term:1 Log:0/5
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
 > 1 receiving messages
-  2->1 MsgAppResp Term:1 Log:0/5
-  2->1 MsgAppResp Term:1 Log:0/5
-  2->1 MsgAppResp Term:1 Log:0/5
-  3->1 MsgAppResp Term:1 Log:0/5
-  3->1 MsgAppResp Term:1 Log:0/5
-  3->1 MsgAppResp Term:1 Log:0/5
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=255
+3: StateReplicate match=3 next=4 score=100
+heir=2 churn=0
+
+# Every follower goes silent. Rounds 1-3: ack age <= 3, in sync. Rounds
+# 4-5: out of sync, but inside the grace period, so heir 2 is kept.
+tick-heartbeat 1
+----
+ok
+
+deliver-msgs drop=(2,3)
+----
+no messages
+
+tick-heartbeat 1
+----
+ok
+
+deliver-msgs drop=(2,3)
+----
+no messages
+
+tick-heartbeat 1
+----
+ok
+
+deliver-msgs drop=(2,3)
+----
+no messages
+
+tick-heartbeat 1
+----
+ok
+
+deliver-msgs drop=(2,3)
+----
+no messages
+
+tick-heartbeat 1
+----
+ok
+
+deliver-msgs drop=(2,3)
+----
+no messages
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=255
+3: StateReplicate match=3 next=4 score=100
+heir=2 churn=0
+
+# Round 6: ack age 6 = ET + grace -> heir dropped. Nobody is in sync, so
+# no heir (explicit heir=0 announced per D4).
+tick-heartbeat 1
+----
+ok
+
+deliver-msgs drop=(2,3)
+----
+no messages
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=255
+3: StateReplicate match=3 next=4 score=100
+heir=0 churn=1
+
+# Heal. Each round samples before that round's acks arrive, so the first
+# round after healing still sees stale acks; three rounds give only two
+# in-sync samples -- not enough to become heir again...
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=255
+3: StateReplicate match=3 next=4 score=100
+heir=0 churn=1
+
+# ...the fourth round gives the third in-sync sample.
+tick-heartbeat 1
+----
+ok
+
+stabilize
+----
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 receiving messages
+  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 3 receiving messages
+  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:3
+> 2 handling Ready
+  Ready MustSync=false:
+  Messages:
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+> 3 handling Ready
+  Ready MustSync=false:
+  Messages:
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+> 1 receiving messages
+  2->1 MsgHeartbeatResp Term:1 Log:0/0
+  3->1 MsgHeartbeatResp Term:1 Log:0/0
+
+status 1
+----
+1: StateReplicate match=3 next=4
+2: StateReplicate match=3 next=4 score=255
+3: StateReplicate match=3 next=4 score=100
+heir=2 churn=1
 
 raft-state
 ----

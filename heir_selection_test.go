@@ -30,17 +30,43 @@ func newHeirTestRaft(t *testing.T, extraVoters ...uint64) *raft {
 	r := newRaft(cfg)
 	r.becomeCandidate()
 	r.becomeLeader()
+	// Far enough from 0 that an "inactive" follower (LastAckTick 0) is
+	// outside the electionTimeout ack window.
+	r.leaderTicks = 1000
 	return r
 }
 
 // setProgress overwrites the leader's view of follower id's progress for
-// test setup -- eligibility and score fields are what selectHeir reads.
+// test setup. "active" means it acked at the current leader tick (these
+// tests call selectHeir directly, which does not advance the clock). An
+// active, reported follower also gets a full in-sync sample history, so
+// these T4.4 tests exercise score/margin/tenure/exclusion rules rather than
+// the D5 warm-up, which heir_insync_test.go covers.
 func setProgress(r *raft, id uint64, active, reported bool, score uint8, match uint64) {
 	pr := r.trk.Progress[id]
 	pr.RecentActive = active
 	pr.ScoreReported = reported
 	pr.StabilityScore = score
 	pr.Match = match
+	if active {
+		pr.LastAckTick = r.leaderTicks
+	} else {
+		pr.LastAckTick = 0
+	}
+	if active && reported {
+		pr.HeirSyncHistory = 1<<heirEntryWindow - 1
+	} else {
+		pr.HeirSyncHistory = 0
+	}
+}
+
+// selectUntilGraceExpires runs selection for one grace period's worth of
+// heartbeat intervals minus one: the last call at which a heir that just
+// went out of sync must still be kept (DESIGN_UPDATE.md D6).
+func selectUntilGraceExpires(r *raft) {
+	for i := 0; i < r.heirSyncGrace/r.heartbeatTimeout-1; i++ {
+		r.selectHeir()
+	}
 }
 
 func TestSelectHeir_PicksTopEligibleScorer(t *testing.T) {
@@ -98,14 +124,15 @@ func TestSelectHeir_IgnoresInactiveOrUnreported(t *testing.T) {
 
 func TestSelectHeir_IgnoresLaggingFollower(t *testing.T) {
 	r := newHeirTestRaft(t)
-	r.maxHeirLag = 0 // zero tolerance: any lag at all disqualifies
+	r.freshnessSlack = 0 // zero tolerance: any lag behind the freshest disqualifies
 	last := r.raftLog.lastIndex()
 	setProgress(r, 2, true, true, 50, last)
 	setProgress(r, 3, true, true, 255, 0) // behind by last-0, highest score
+	r.trk.Progress[3].HeirSyncHistory = 0 // never in sync: no warm-up credit
 
 	r.selectHeir()
 	if r.heir != 2 {
-		t.Fatalf("heir = %d, want 2 (follower 3 lags beyond maxHeirLag=0)", r.heir)
+		t.Fatalf("heir = %d, want 2 (follower 3 lags beyond freshnessSlack=0)", r.heir)
 	}
 }
 
@@ -189,9 +216,14 @@ func TestSelectHeir_ReplacesHeirThatBecomesIneligible(t *testing.T) {
 	}
 
 	// Heir 2 goes inactive. Even though 3's score is far below what the
-	// margin/tenure gates would ever allow, an ineligible heir must be
-	// replaced immediately.
+	// margin/tenure gates would ever allow, a heir out of sync for the whole
+	// grace period must be replaced -- but not before (DESIGN_UPDATE.md D6;
+	// v1 replaced it on the first bad sample).
 	setProgress(r, 2, false, true, 255, last)
+	selectUntilGraceExpires(r)
+	if r.heir != 2 {
+		t.Fatalf("heir = %d, want 2 still inside the grace period", r.heir)
+	}
 	r.selectHeir()
 	if r.heir != 3 {
 		t.Fatalf("heir = %d, want 3 (heir 2 became ineligible; must be replaced regardless of margin/tenure)", r.heir)
@@ -213,6 +245,7 @@ func TestSelectHeir_NoEligibleFollowerClearsHeir(t *testing.T) {
 
 	setProgress(r, 2, false, true, 100, last)
 	setProgress(r, 3, false, true, 50, last)
+	selectUntilGraceExpires(r)
 	r.selectHeir()
 	if r.heir != None {
 		t.Fatalf("heir = %d, want None (no eligible follower left)", r.heir)
@@ -357,13 +390,18 @@ func TestTickHeartbeat_CheckQuorumResetDoesNotChurnHealthyHeir(t *testing.T) {
 		pr.ScoreReported = true
 		pr.StabilityScore = 200
 		pr.Match = r.raftLog.lastIndex()
+		pr.LastAckTick = r.leaderTicks
 	}
 
 	var churn int
-	var everNone bool
+	var everNone, everSet bool
 	for i := 0; i < 60; i++ { // several multiples of electionTimeout=3
 		r.tickHeartbeat()
-		if r.heir == None {
+		// No heir during the D5 warm-up (3 of 5 samples) is expected; once
+		// one is set it must never drop back to None.
+		if r.heir != None {
+			everSet = true
+		} else if everSet {
 			everNone = true
 		}
 		// Re-mark active on every tick, as real MsgHeartbeatResp/MsgAppResp
@@ -376,9 +414,13 @@ func TestTickHeartbeat_CheckQuorumResetDoesNotChurnHealthyHeir(t *testing.T) {
 			pr.ScoreReported = true
 			pr.StabilityScore = 200
 			pr.Match = r.raftLog.lastIndex()
+			pr.LastAckTick = r.leaderTicks
 		}
 	}
 	churn = int(r.heirChurn)
+	if !everSet {
+		t.Fatal("no heir was ever selected")
+	}
 
 	if everNone {
 		t.Error("heir dropped to None at some point despite followers being continuously eligible -- CheckQuorum's RecentActive reset raced selectHeir")

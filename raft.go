@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"math/bits"
 	"slices"
 	"strings"
 	"sync"
@@ -83,6 +84,19 @@ const (
 )
 
 const noLimit = math.MaxUint64
+
+// FreshnessSlackStrict is the Config.FreshnessSlack value that requests a
+// slack of 0 (0 itself selects the default).
+const FreshnessSlackStrict = -1
+
+// heirEntryWindow/heirEntryNeeded: a follower can become heir once it was in
+// sync in at least heirEntryNeeded of its last heirEntryWindow samples
+// (one sample per heartbeat interval; DESIGN_UPDATE.md D5, chosen by
+// Piyumi 2026-09-28).
+const (
+	heirEntryWindow = 5
+	heirEntryNeeded = 3
+)
 
 // ErrProposalDropped is returned when the proposal is ignored by some cases,
 // so that the proposer can be notified and fail fast.
@@ -316,10 +330,15 @@ type Config struct {
 	// the values below when left at their zero value; this is safe even
 	// when every HeirRaft flag above is false, since they're then unused.
 
-	// MaxHeirLag is the log-lag eligibility bound (in entries): a follower
-	// more than MaxHeirLag entries behind the leader's last index cannot be
-	// heir. Default: 256.
-	MaxHeirLag uint64
+	// FreshnessSlack is how many entries a follower's Match may trail the
+	// freshest live follower's Match and still count as in sync for heir
+	// selection (DESIGN_UPDATE.md D5). 0 (zero value) means the default, 1;
+	// FreshnessSlackStrict requests 0 (must match the freshest follower).
+	FreshnessSlack int
+	// HeirSyncGrace is how many ticks the current heir may be continuously
+	// out of sync before the leader drops it (DESIGN_UPDATE.md D6: the
+	// eligibility hysteresis). Default: ElectionTick.
+	HeirSyncGrace int
 	// HysteresisMargin is the minimum score lead (out of 255) a challenger
 	// must have over the current heir before replacing it, to prevent
 	// churn. Default: 20.
@@ -415,8 +434,15 @@ func (c *Config) validateHeirRaft() error {
 		return errors.New("HeirElection, HeirLogPriority, and GracefulHandover require a non-nil StabilityScorer")
 	}
 
-	if c.MaxHeirLag == 0 {
-		c.MaxHeirLag = 256
+	if c.FreshnessSlack == 0 {
+		c.FreshnessSlack = 1
+	} else if c.FreshnessSlack < FreshnessSlackStrict {
+		return errors.New("FreshnessSlack must be >= 0, or FreshnessSlackStrict")
+	}
+	if c.HeirSyncGrace == 0 {
+		c.HeirSyncGrace = c.ElectionTick
+	} else if c.HeirSyncGrace < 0 {
+		return errors.New("HeirSyncGrace must be >= 0")
 	}
 	if c.HysteresisMargin == 0 {
 		c.HysteresisMargin = 20
@@ -553,13 +579,15 @@ type raft struct {
 	// for nil rather than assuming any HeirRaft flag implies it's set.
 	stabilityScorer stability.Scorer
 
-	// heirElection, maxHeirLag, hysteresisMargin and minHeirTenure mirror the
-	// matching Config fields (DESIGN.md §2.3/§5). heirElection gates whether
+	// heirElection, freshnessSlack, heirSyncGrace, hysteresisMargin and
+	// minHeirTenure mirror the matching Config fields (DESIGN.md §2.3/§5,
+	// DESIGN_UPDATE.md D5/D6; freshnessSlack is already resolved to >= 0). heirElection gates whether
 	// selectHeir does anything at all; false (the default) makes it a no-op,
 	// so r.heir/r.knownHeir stay None forever and the wire format is
 	// byte-identical to stock (CLAUDE.md constraint 4).
 	heirElection     bool
-	maxHeirLag       uint64
+	freshnessSlack   uint64
+	heirSyncGrace    int
 	hysteresisMargin uint8
 	minHeirTenure    int
 	// heirJitter and nonHeirBackoff mirror Config.HeirJitter/NonHeirBackoff
@@ -592,6 +620,11 @@ type raft struct {
 	// (*raft).reset on term change, or by the leader announcing another heir
 	// or an explicit 0. No tick-based expiry (DESIGN_UPDATE.md D4).
 	knownHeir uint64
+
+	// leaderTicks counts this node's ticks as leader (monotonic, never
+	// reset). Followers' Progress.LastAckTick is stamped with it, so ack age
+	// is leaderTicks - LastAckTick (DESIGN_UPDATE.md D6).
+	leaderTicks uint64
 
 	// heirRetries counts consecutive failed PreCandidate rounds this node
 	// has run while it believed itself the heir, since the last time it
@@ -660,7 +693,8 @@ func newRaft(c *Config) *raft {
 		traceLogger:                 c.TraceLogger,
 		stabilityScorer:             c.StabilityScorer,
 		heirElection:                c.HeirElection,
-		maxHeirLag:                  c.MaxHeirLag,
+		freshnessSlack:              resolveFreshnessSlack(c.FreshnessSlack),
+		heirSyncGrace:               c.HeirSyncGrace,
 		hysteresisMargin:            c.HysteresisMargin,
 		minHeirTenure:               c.MinHeirTenure,
 		heirJitter:                  c.HeirJitter,
@@ -1095,6 +1129,7 @@ func (r *raft) tickElection() {
 
 // tickHeartbeat is run by leaders to send a MsgBeat after r.heartbeatTimeout.
 func (r *raft) tickHeartbeat() {
+	r.leaderTicks++
 	r.heartbeatElapsed++
 	r.electionElapsed++
 
@@ -1665,6 +1700,7 @@ func stepLeader(r *raft, m *pb.Message) error {
 		// an MsgAppResp to acknowledge the appended entries in the last Ready.
 
 		pr.RecentActive = true
+		pr.LastAckTick = r.leaderTicks
 		if m.Stability != nil {
 			pr.StabilityScore = uint8(m.GetStability())
 			pr.ScoreReported = true
@@ -1861,6 +1897,7 @@ func stepLeader(r *raft, m *pb.Message) error {
 		}
 	case pb.MsgHeartbeatResp:
 		pr.RecentActive = true
+		pr.LastAckTick = r.leaderTicks
 		pr.MsgAppFlowPaused = false
 		if m.Stability != nil {
 			pr.StabilityScore = uint8(m.GetStability())
@@ -2117,50 +2154,85 @@ func (r *raft) heirStamp() *uint64 {
 	return new(r.heir)
 }
 
-// selectHeir runs the leader-side heir-selection algorithm (DESIGN.md §2.3)
-// once per heartbeat interval: rank eligible followers by stability score
-// and replace the current heir only past the hysteresis gate (or
-// immediately, if the current heir became ineligible). A no-op when
-// HeirElection is off.
+// selectHeir runs the leader-side heir-selection algorithm once per
+// heartbeat interval (DESIGN.md §2.3, revised by DESIGN_UPDATE.md D5/D6):
+//
+//  1. Sample every voter follower: in sync this interval iff it acked
+//     within electionTimeout, has reported a score this term, holds every
+//     committed entry (Match >= committed), and trails the freshest live
+//     follower by at most freshnessSlack entries. Freshness is a gate, not
+//     a weight: a stale heir cannot win a Raft election.
+//  2. The current heir is kept until it has been out of sync continuously
+//     for heirSyncGrace ticks, so one slow ack never causes churn.
+//  3. A follower can become heir once in sync in heirEntryNeeded of its
+//     last heirEntryWindow samples. Among those: highest score, then lowest
+//     ID. A kept heir is replaced by a challenger only past the score
+//     hysteresis margin and minimum tenure.
+//  4. Nobody eligible: no heir, so every node runs stock timers (D3).
+//
+// A no-op when HeirElection is off.
 func (r *raft) selectHeir() {
 	if !r.heirElection {
 		return
 	}
-
-	lastIndex := r.raftLog.lastIndex()
 	voters := r.trk.Config.Voters.IDs()
+	ackWindow := uint64(r.electionTimeout)
+	acked := func(pr *tracker.Progress) bool {
+		return r.leaderTicks-pr.LastAckTick <= ackWindow
+	}
+
+	// Freshest live follower (a follower silent for over ET does not set
+	// the bar: its Match says nothing about the log others must beat).
+	var maxMatch uint64
+	r.trk.Visit(func(id uint64, pr *tracker.Progress) {
+		if _, ok := voters[id]; ok && id != r.id && acked(pr) && pr.Match > maxMatch {
+			maxMatch = pr.Match
+		}
+	})
+	committed := r.raftLog.committed
 
 	var bestID uint64
 	var bestScore uint8
 	found := false
 	r.trk.Visit(func(id uint64, pr *tracker.Progress) {
-		if id == r.id || !r.heirEligible(id, pr, lastIndex, voters) {
+		if _, ok := voters[id]; !ok || id == r.id {
 			return
 		}
+		inSync := acked(pr) && pr.ScoreReported &&
+			pr.Match >= committed && pr.Match+r.freshnessSlack >= maxMatch
+		pr.HeirSyncHistory = (pr.HeirSyncHistory << 1) & (1<<heirEntryWindow - 1)
+		if inSync {
+			pr.HeirSyncHistory |= 1
+			pr.HeirOutOfSyncTicks = 0
+		} else {
+			pr.HeirOutOfSyncTicks += r.heartbeatTimeout
+		}
+		if bits.OnesCount8(pr.HeirSyncHistory) < heirEntryNeeded {
+			return
+		}
+		// Visit iterates in ascending ID order, so strict > keeps the
+		// lowest ID on a score tie.
 		if !found || pr.StabilityScore > bestScore {
 			bestID, bestScore, found = id, pr.StabilityScore, true
 		}
 	})
 
-	if !found {
-		r.changeHeir(None)
-		return
-	}
-	if r.heir == None || bestID == r.heir {
-		r.changeHeir(bestID)
-		return
-	}
-
-	// A different eligible follower scores higher than the current heir
-	// (see the Visit loop above: bestID can only differ from r.heir if the
-	// current heir was in the running and lost on score). Replace it only if
-	// the current heir has itself become ineligible, or both the hysteresis
-	// margin and the minimum tenure are satisfied.
 	curPr := r.trk.Progress[r.heir]
-	if curPr == nil || !r.heirEligible(r.heir, curPr, lastIndex, voters) {
-		r.changeHeir(bestID)
+	_, curVoter := voters[r.heir]
+	keep := r.heir != None && curPr != nil && curVoter && curPr.HeirOutOfSyncTicks < r.heirSyncGrace
+	if !keep {
+		if found {
+			r.changeHeir(bestID)
+		} else {
+			r.changeHeir(None)
+		}
 		return
 	}
+	if !found || bestID == r.heir {
+		return
+	}
+	// A challenger outscores the kept heir. As in v1, tenure only
+	// accumulates in rounds where a challenger exists.
 	if int(bestScore) >= int(curPr.StabilityScore)+int(r.hysteresisMargin) && r.heirTenure >= r.minHeirTenure {
 		r.changeHeir(bestID)
 		return
@@ -2168,22 +2240,12 @@ func (r *raft) selectHeir() {
 	r.heirTenure++
 }
 
-// heirEligible reports whether follower id may be designated heir
-// (DESIGN.md §2.3 eligibility gate): a voter, recently active, has reported
-// a score this term, and isn't lagging the leader's log by more than
-// maxHeirLag entries.
-func (r *raft) heirEligible(id uint64, pr *tracker.Progress, lastIndex uint64, voters map[uint64]struct{}) bool {
-	if _, ok := voters[id]; !ok {
-		return false
+// resolveFreshnessSlack maps a validated Config.FreshnessSlack to entries.
+func resolveFreshnessSlack(v int) uint64 {
+	if v == FreshnessSlackStrict {
+		return 0
 	}
-	if !pr.RecentActive || !pr.ScoreReported {
-		return false
-	}
-	var lag uint64
-	if pr.Match < lastIndex {
-		lag = lastIndex - pr.Match
-	}
-	return lag <= r.maxHeirLag
+	return uint64(v)
 }
 
 // changeHeir sets the leader's designated heir, resetting tenure and
@@ -2240,10 +2302,10 @@ func (r *raft) maybeGracefulHandover() {
 		return
 	}
 
+	// Hand over only to a heir that was in sync in the latest sample
+	// (DESIGN_UPDATE.md D5/D6), not merely one still inside its grace period.
 	heirPr := r.trk.Progress[r.heir]
-	lastIndex := r.raftLog.lastIndex()
-	if r.heir == None || heirPr == nil ||
-		!r.heirEligible(r.heir, heirPr, lastIndex, r.trk.Config.Voters.IDs()) ||
+	if r.heir == None || heirPr == nil || heirPr.HeirSyncHistory&1 == 0 ||
 		int(heirPr.StabilityScore) < int(r.handoverThreshold)+int(r.hysteresisMargin) {
 		return
 	}

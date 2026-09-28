@@ -45,6 +45,9 @@ func setEligibleHeir(r *raft, id uint64, score uint8) {
 	pr.ScoreReported = true
 	pr.StabilityScore = score
 	pr.Match = r.raftLog.lastIndex()
+	// In sync in every recent sample (DESIGN_UPDATE.md D5/D6).
+	pr.LastAckTick = r.leaderTicks
+	pr.HeirSyncHistory = 1<<heirEntryWindow - 1
 }
 
 func TestMaybeGracefulHandover_TriggersAfterDegradeWindow(t *testing.T) {
