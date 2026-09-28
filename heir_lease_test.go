@@ -83,15 +83,47 @@ func TestHeirLease_GrantsHeirAfterHeirTimeoutOfSilence(t *testing.T) {
 	}
 }
 
-// (b) A heir with a bad link to a leader the voter still hears is ignored.
+// (b) A heir with a bad link to a leader the voter still hears is ignored:
+// below the exemption threshold (max(H-1, 2) ticks of the voter's own
+// silence) the lease holds.
 func TestHeirLease_IgnoresHeirWhileVoterHearsLeader(t *testing.T) {
 	r := newLeaseVoter(t, true)
-	silence(r, r.heirTimeout-1)
+	silence(r, r.heirLeaseThreshold()-1)
 	if err := r.Step(voteReq(r, pb.MsgPreVote, 2)); err != nil {
 		t.Fatal(err)
 	}
 	if resp := response(t, r); resp != nil {
-		t.Fatalf("PreVote from heir after %d silent ticks: got %v, want ignored (voter still in contact)", r.heirTimeout-1, resp)
+		t.Fatalf("PreVote from heir after %d silent ticks: got %v, want ignored (voter still in contact)", r.heirLeaseThreshold()-1, resp)
+	}
+}
+
+// Tick-phase allowance (Piyumi 2026-09-28, smoke test finding): the heir
+// fires after H ticks of ITS OWN silence, while a voter whose tick phase
+// lags can be at H-1. The voter therefore exempts the heir from H-1 ticks
+// (never below 2: it must still have missed two heartbeats). In the smoke
+// test 4/10 heir PreVotes arrived at the voter's H-1 and cost a ~300 ms
+// retry.
+func TestHeirLease_ThresholdIsHeirTimeoutMinusOne(t *testing.T) {
+	r := newLeaseVoter(t, true) // HeirTimeout default 3
+	if got := r.heirLeaseThreshold(); got != 2 {
+		t.Fatalf("heirLeaseThreshold() = %d at H=3, want 2", got)
+	}
+	silence(r, 2)
+	if err := r.Step(voteReq(r, pb.MsgPreVote, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if resp := response(t, r); resp == nil || resp.GetReject() {
+		t.Fatalf("PreVote from heir after 2 silent ticks (H-1): %v, want granted", resp)
+	}
+	r5 := newLeaseVoter(t, true)
+	r5.heirTimeout = 5
+	if got := r5.heirLeaseThreshold(); got != 4 {
+		t.Fatalf("heirLeaseThreshold() = %d at H=5, want 4", got)
+	}
+	r2 := newLeaseVoter(t, true)
+	r2.heirTimeout = 2
+	if got := r2.heirLeaseThreshold(); got != 2 {
+		t.Fatalf("heirLeaseThreshold() = %d at H=2, want floor 2", got)
 	}
 }
 

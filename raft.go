@@ -318,7 +318,8 @@ type Config struct {
 	HeirElection bool
 	// HeirLease lets a voter skip the CheckQuorum lease for one sender only:
 	// the heir the leader announced to it, and only once the voter itself
-	// has not heard from the leader for HeirTimeout ticks
+	// has not heard from the leader for max(HeirTimeout-1, 2) ticks (one
+	// tick of allowance for tick phase)
 	// (DESIGN_UPDATE.md D2). One vote per term and the log up-to-date check
 	// are unchanged. Inert without HeirElection (no heir is ever known).
 	// Disabled, with a warning, under ReadOnlyLeaseBased, whose reads rely
@@ -2297,14 +2298,27 @@ func (r *raft) redrawAfterHeirAnnouncement() {
 // heirLeaseExempt reports whether a (Pre)Vote may skip the CheckQuorum lease
 // (DESIGN_UPDATE.md D2): it comes from the heir the leader announced to this
 // voter, and this voter has itself not heard from the leader for
-// heirTimeout ticks. A heir whose link to the leader alone is bad is still
+// heirLeaseThreshold ticks. A heir whose link to the leader alone is bad is still
 // ignored by voters that hear the leader, so it cannot depose a healthy
 // leader; the early vote needs a majority that saw the silence. Only the
 // anti-disruption lease is shortened: canVote (one vote per term) and the
 // log up-to-date check below are untouched.
 func (r *raft) heirLeaseExempt(m *pb.Message) bool {
 	return r.heirLease && r.currentHeir() != None && m.GetFrom() == r.currentHeir() &&
-		r.electionElapsed >= r.heirTimeout
+		r.electionElapsed >= r.heirLeaseThreshold()
+}
+
+// heirLeaseThreshold is how many ticks of its own leader silence a voter
+// needs before exempting the heir: heirTimeout-1, never below 2. The heir
+// fires after heirTimeout ticks of ITS OWN silence, and a voter whose tick
+// phase lags can still be one tick short; without the allowance 4/10 heir
+// PreVotes in the 2026-09-28 smoke test were refused and cost a ~300 ms
+// retry. The floor keeps "the voter itself missed at least two heartbeats".
+func (r *raft) heirLeaseThreshold() int {
+	if t := r.heirTimeout - 1; t > 2 {
+		return t
+	}
+	return 2
 }
 
 // heirDraw returns the heir's next randomized election timeout, counted
