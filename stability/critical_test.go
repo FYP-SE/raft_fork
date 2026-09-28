@@ -18,18 +18,23 @@ func saturate(s *EWMAScorer, sig Signal) {
 	}
 }
 
-// One fully degraded signal must lower the score by at least 2x the default
-// HysteresisMargin (20), so a degraded heir is always replaceable.
-func TestCalibration_OneBadSignalDropsScoreByTwiceMargin(t *testing.T) {
-	const hysteresisMargin = 20
+// One fully degraded signal must lower the score by more than the default
+// HysteresisMargin (40 = ~3x the healthy-node noise p99 of 14 measured
+// 2026-09-28), so a degraded heir is replaceable on score alone. The
+// original "2x margin" headroom rule cannot hold at 40 (it would need 80;
+// the drops are 51-77). Only the 0.3-weight signals (CPU, fsync: -77) also
+// clear margin + noise (54); the 0.2-weight ones (memory, jitter: -51) do
+// not by themselves -- a bad link is caught by D6 (in-sync) instead.
+func TestCalibration_OneBadSignalDropsScoreBeyondMargin(t *testing.T) {
+	const hysteresisMargin = 40
 	for _, sig := range []Signal{SignalCPU, SignalMemory, SignalFsync, SignalJitter} {
 		s, err := NewEWMAScorer(DefaultEWMAConfig(defaultBounds()))
 		if err != nil {
 			t.Fatal(err)
 		}
 		saturate(s, sig)
-		if drop := 255 - int(s.Score()); drop < 2*hysteresisMargin {
-			t.Errorf("signal %d fully bad: score dropped %d, want >= %d", sig, drop, 2*hysteresisMargin)
+		if drop := 255 - int(s.Score()); drop <= hysteresisMargin {
+			t.Errorf("signal %d fully bad: score dropped %d, want > %d", sig, drop, hysteresisMargin)
 		}
 	}
 }
@@ -100,5 +105,25 @@ func TestVar_CriticalSettable(t *testing.T) {
 	v.SetCritical(true)
 	if !v.Critical() {
 		t.Fatal("SetCritical(true) not reported")
+	}
+}
+
+// Health exposes one signal's smoothed health for observability (per-signal
+// metrics, 2026-09-28: the composite alone cannot say which signal costs a
+// healthy node ~43 points).
+func TestEWMAScorer_Health(t *testing.T) {
+	s, err := NewEWMAScorer(DefaultEWMAConfig(defaultBounds()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Health(SignalFsync); got != 1 {
+		t.Fatalf("fresh Health(fsync) = %v, want 1", got)
+	}
+	saturate(s, SignalFsync)
+	if got := s.Health(SignalFsync); got > 0.01 {
+		t.Fatalf("Health(fsync) after saturation = %v, want ~0", got)
+	}
+	if got := s.Health(SignalCPU); got != 1 {
+		t.Fatalf("Health(cpu) = %v, want untouched 1", got)
 	}
 }

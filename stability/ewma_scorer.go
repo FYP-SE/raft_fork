@@ -172,3 +172,11 @@ func (s *EWMAScorer) Critical() bool {
 	}
 	return false
 }
+
+// Health returns one signal's smoothed health in [0,1] (1 = at Bounds.Min,
+// 0 = at Bounds.Max), for observability.
+func (s *EWMAScorer) Health(sig Signal) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ewma[sig]
+}

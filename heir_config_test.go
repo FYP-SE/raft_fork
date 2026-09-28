@@ -42,7 +42,7 @@ func TestConfig_ValidateFillsTunableDefaults(t *testing.T) {
 		t.Fatalf("validate(): %v", err)
 	}
 	// Defaults per DESIGN.md §5.
-	wantHysteresisMargin := uint8(20)
+	wantHysteresisMargin := uint8(40) // ~3x measured healthy noise (p99 14), 2026-09-28
 	wantMinHeirTenure := 10
 	wantHeirJitter := 0.1
 	wantNonHeirBackoff := 1.0 // DESIGN_UPDATE.md D3

@@ -350,7 +350,8 @@ type Config struct {
 	HeirSyncGrace int
 	// HysteresisMargin is the minimum score lead (out of 255) a challenger
 	// must have over the current heir before replacing it, to prevent
-	// churn. Default: 20.
+	// churn. Default: 40, about 3x the healthy-node score noise (p99 14)
+	// measured on the testbed 2026-09-28 (DESIGN_UPDATE.md D7).
 	HysteresisMargin uint8
 	// MinHeirTenure is the minimum number of heartbeat intervals a heir must
 	// hold the role before it can be replaced by a higher-scoring
@@ -460,7 +461,7 @@ func (c *Config) validateHeirRaft() error {
 		return errors.New("HeirSyncGrace must be >= 0")
 	}
 	if c.HysteresisMargin == 0 {
-		c.HysteresisMargin = 20
+		c.HysteresisMargin = 40
 	}
 	if c.MinHeirTenure == 0 {
 		c.MinHeirTenure = 10
