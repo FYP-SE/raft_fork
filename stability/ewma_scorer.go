@@ -40,6 +40,11 @@ type EWMAConfig struct {
 	// Bounds gives the reference range for each in-use signal (every signal
 	// with a nonzero Weights entry must have a Bounds entry).
 	Bounds map[Signal]Bounds
+	// CriticalLevel: Critical() reports true when any weighted signal's
+	// smoothed health (1 = at Bounds.Min, 0 = at Bounds.Max) is at or below
+	// this. Must be in [0,1]; 0 in a hand-built config means only a signal
+	// pinned at its bad bound counts. DefaultEWMAConfig uses 0.1.
+	CriticalLevel float64
 }
 
 // DefaultEWMAConfig returns DESIGN.md §5's default alpha/weights (CPU .3,
@@ -48,7 +53,8 @@ type EWMAConfig struct {
 // what unit "CPU" or "fsync latency" are measured in).
 func DefaultEWMAConfig(bounds map[Signal]Bounds) EWMAConfig {
 	return EWMAConfig{
-		Alpha: 0.2,
+		Alpha:         0.2,
+		CriticalLevel: 0.1,
 		Weights: map[Signal]float64{
 			SignalCPU:    0.3,
 			SignalMemory: 0.2,
@@ -62,6 +68,9 @@ func DefaultEWMAConfig(bounds map[Signal]Bounds) EWMAConfig {
 func (cfg EWMAConfig) validate() error {
 	if cfg.Alpha <= 0 || cfg.Alpha > 1 {
 		return fmt.Errorf("stability: EWMAConfig.Alpha must be in (0,1], got %v", cfg.Alpha)
+	}
+	if cfg.CriticalLevel < 0 || cfg.CriticalLevel > 1 {
+		return fmt.Errorf("stability: EWMAConfig.CriticalLevel must be in [0,1], got %v", cfg.CriticalLevel)
 	}
 	if len(cfg.Weights) == 0 {
 		return fmt.Errorf("stability: EWMAConfig.Weights must not be empty")
@@ -149,4 +158,17 @@ func (s *EWMAScorer) Score() uint8 {
 	default:
 		return uint8(scaled)
 	}
+}
+
+// Critical implements CriticalReporter: true if any signal with a nonzero
+// weight has a smoothed health at or below CriticalLevel.
+func (s *EWMAScorer) Critical() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sig, w := range s.cfg.Weights {
+		if w > 0 && s.ewma[sig] <= s.cfg.CriticalLevel {
+			return true
+		}
+	}
+	return false
 }

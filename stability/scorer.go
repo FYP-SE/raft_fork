@@ -13,6 +13,15 @@ type Scorer interface {
 	Score() uint8
 }
 
+// CriticalReporter is optionally implemented by a Scorer that can also say
+// whether any single signal is critical (DESIGN_UPDATE.md D7). The weighted
+// score ranks heirs; a critical signal lets the leader hand over even when
+// the weighted score is still above HandoverThreshold, which one bad signal
+// out of several can never push it below.
+type CriticalReporter interface {
+	Critical() bool
+}
+
 // ConstScorer is a fixed-value Scorer for tests: it always reports the same
 // score regardless of any sampling.
 type ConstScorer uint8

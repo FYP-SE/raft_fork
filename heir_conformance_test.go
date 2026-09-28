@@ -39,6 +39,7 @@ func maybeForceHeirRaftOn(cfg *Config) {
 	}
 	cfg.StabilityScorer = stability.ConstScorer(200)
 	cfg.HeirElection = true
+	cfg.HeirLease = true // DESIGN_UPDATE.md D2
 	cfg.HeirLogPriority = true
 	cfg.GracefulHandover = true
 }

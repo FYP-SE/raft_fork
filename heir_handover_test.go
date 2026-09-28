@@ -53,7 +53,7 @@ func setEligibleHeir(r *raft, id uint64, score uint8) {
 func TestMaybeGracefulHandover_TriggersAfterDegradeWindow(t *testing.T) {
 	r, v := newHandoverTestRaft(t, 3, 100)
 	setEligibleHeir(r, 2, 255) // comfortably above threshold(64)+margin(20)
-	v.Set(30)                 // below HandoverThreshold=64
+	v.Set(30)                  // below HandoverThreshold=64
 
 	for i := 0; i < 2; i++ {
 		r.maybeGracefulHandover()

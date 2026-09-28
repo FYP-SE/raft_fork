@@ -316,6 +316,14 @@ type Config struct {
 	// (DESIGN.md §2.5): the heir fires first on leader crash, non-heirs
 	// deliberately wait longer. Requires StabilityScorer to be set.
 	HeirElection bool
+	// HeirLease lets a voter skip the CheckQuorum lease for one sender only:
+	// the heir the leader announced to it, and only once the voter itself
+	// has not heard from the leader for HeirTimeout ticks
+	// (DESIGN_UPDATE.md D2). One vote per term and the log up-to-date check
+	// are unchanged. Inert without HeirElection (no heir is ever known).
+	// Disabled, with a warning, under ReadOnlyLeaseBased, whose reads rely
+	// on the full lease -- the same way raft ignores MsgForgetLeader there.
+	HeirLease bool
 	// HeirLogPriority sends MsgApp to the heir first (DESIGN.md §2.7) --
 	// dispatch ordering only, no change to commit/quorum semantics. Requires
 	// StabilityScorer to be set.
@@ -607,7 +615,13 @@ type raft struct {
 	// selectHeir does anything at all; false (the default) makes it a no-op,
 	// so r.heir/r.knownHeir stay None forever and the wire format is
 	// byte-identical to stock (CLAUDE.md constraint 4).
-	heirElection     bool
+	heirElection bool
+	// heirLease mirrors Config.HeirLease (DESIGN_UPDATE.md D2), forced off
+	// under ReadOnlyLeaseBased.
+	heirLease bool
+	// heirAnnounced is true once this leader has had a heir in the current
+	// term, so heirStamp keeps sending (an explicit 0 after a drop).
+	heirAnnounced    bool
 	freshnessSlack   uint64
 	heirSyncGrace    int
 	hysteresisMargin uint8
@@ -712,6 +726,7 @@ func newRaft(c *Config) *raft {
 		traceLogger:                 c.TraceLogger,
 		stabilityScorer:             c.StabilityScorer,
 		heirElection:                c.HeirElection,
+		heirLease:                   c.HeirLease && c.ReadOnlyOption != ReadOnlyLeaseBased,
 		freshnessSlack:              resolveFreshnessSlack(c.FreshnessSlack),
 		heirSyncGrace:               c.HeirSyncGrace,
 		hysteresisMargin:            c.HysteresisMargin,
@@ -754,6 +769,9 @@ func newRaft(c *Config) *raft {
 	// TODO(pav-kv): it should be ok to simply print %+v for lastID.
 	r.logger.Infof("newRaft %x [peers: [%s], term: %d, commit: %d, applied: %d, lastindex: %d, lastterm: %d]",
 		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.applied, lastID.index, lastID.term)
+	if c.HeirLease && c.ReadOnlyOption == ReadOnlyLeaseBased {
+		r.logger.Warningf("%x HeirLease disabled: incompatible with ReadOnlyLeaseBased (lease reads rely on the full CheckQuorum lease)", r.id)
+	}
 	return r
 }
 
@@ -1068,6 +1086,7 @@ func (r *raft) reset(term uint64) {
 	// (DESIGN_UPDATE.md D4 follow-up, 2026-09-28).
 	r.heir = None
 	r.heirTenure = 0
+	r.heirAnnounced = false
 	r.knownHeir = None
 	r.heirSilence = 0
 	r.degradeTicks = 0
@@ -1431,6 +1450,9 @@ func (r *raft) Step(m *pb.Message) error {
 		if m.GetType() == pb.MsgVote || m.GetType() == pb.MsgPreVote {
 			force := bytes.Equal(m.GetContext(), []byte(campaignTransfer))
 			inLease := r.checkQuorum && r.lead != None && r.electionElapsed < r.electionTimeout
+			if inLease && r.heirLeaseExempt(m) {
+				inLease = false
+			}
 			if !force && inLease {
 				// If a server receives a RequestVote request within the minimum election timeout
 				// of hearing from a current leader, it does not update its term or grant its vote
@@ -2160,12 +2182,14 @@ func (r *raft) stabilityStamp() *uint32 {
 }
 
 // heirStamp returns the leader's currently designated heir to attach to an
-// outgoing MsgHeartbeat/MsgApp. With HeirElection on it is always set, and
-// an explicit 0 when there is no heir, so followers drop a heir the leader
-// dropped (DESIGN_UPDATE.md D4). With HeirElection off it is nil, keeping
-// the message wire-identical to stock (DESIGN.md §2.4).
+// outgoing MsgHeartbeat/MsgApp. Once this leader has announced a heir in
+// the current term, it is always set -- an explicit 0 after the heir is
+// dropped -- so followers drop a heir the leader dropped (DESIGN_UPDATE.md
+// D4). Before any heir this term, and always with HeirElection off, it is
+// nil, keeping messages identical to stock (DESIGN.md §2.4; upstream
+// conformance tests compare exact messages).
 func (r *raft) heirStamp() *uint64 {
-	if !r.heirElection {
+	if !r.heirElection || (r.heir == None && !r.heirAnnounced) {
 		return nil
 	}
 	return new(r.heir)
@@ -2270,6 +2294,19 @@ func (r *raft) redrawAfterHeirAnnouncement() {
 	}
 }
 
+// heirLeaseExempt reports whether a (Pre)Vote may skip the CheckQuorum lease
+// (DESIGN_UPDATE.md D2): it comes from the heir the leader announced to this
+// voter, and this voter has itself not heard from the leader for
+// heirTimeout ticks. A heir whose link to the leader alone is bad is still
+// ignored by voters that hear the leader, so it cannot depose a healthy
+// leader; the early vote needs a majority that saw the silence. Only the
+// anti-disruption lease is shortened: canVote (one vote per term) and the
+// log up-to-date check below are untouched.
+func (r *raft) heirLeaseExempt(m *pb.Message) bool {
+	return r.heirLease && r.currentHeir() != None && m.GetFrom() == r.currentHeir() &&
+		r.electionElapsed >= r.heirTimeout
+}
+
 // heirDraw returns the heir's next randomized election timeout, counted
 // from now (electionElapsed is 0 at every draw site). DESIGN_UPDATE.md D1:
 //
@@ -2323,6 +2360,9 @@ func (r *raft) changeHeir(id uint64) {
 	}
 	r.heir = id
 	r.heirTenure = 0
+	if id != None {
+		r.heirAnnounced = true
+	}
 }
 
 // maybeGracefulHandover triggers a proactive leadership transfer to the
@@ -2348,7 +2388,13 @@ func (r *raft) maybeGracefulHandover() {
 		r.handoverCooldownRemaining--
 	}
 
-	if r.stabilityScorer.Score() >= r.handoverThreshold {
+	// Degraded: weighted score below threshold, or any single signal
+	// critical (DESIGN_UPDATE.md D7).
+	critical := false
+	if cr, ok := r.stabilityScorer.(stability.CriticalReporter); ok {
+		critical = cr.Critical()
+	}
+	if r.stabilityScorer.Score() >= r.handoverThreshold && !critical {
 		r.degradeTicks = 0
 		return
 	}

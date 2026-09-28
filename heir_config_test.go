@@ -115,12 +115,12 @@ func TestConfig_ValidateAcceptsFlagsWithScorer(t *testing.T) {
 
 func TestConfig_ValidateRejectsBadTunables(t *testing.T) {
 	cases := map[string]func(*Config){
-		"NonHeirBackoff below 1": func(c *Config) { c.NonHeirBackoff = 0.5 },
-		"NonHeirBackoff above 2": func(c *Config) { c.NonHeirBackoff = 2.5 },
-		"HeirJitter negative":    func(c *Config) { c.HeirJitter = -0.1 },
-		"HeirJitter above 1":     func(c *Config) { c.HeirJitter = 1.5 },
-		"MinHeirTenure negative": func(c *Config) { c.MinHeirTenure = -1 },
-		"DegradeWindow negative": func(c *Config) { c.DegradeWindow = -1 },
+		"NonHeirBackoff below 1":    func(c *Config) { c.NonHeirBackoff = 0.5 },
+		"NonHeirBackoff above 2":    func(c *Config) { c.NonHeirBackoff = 2.5 },
+		"HeirJitter negative":       func(c *Config) { c.HeirJitter = -0.1 },
+		"HeirJitter above 1":        func(c *Config) { c.HeirJitter = 1.5 },
+		"MinHeirTenure negative":    func(c *Config) { c.MinHeirTenure = -1 },
+		"DegradeWindow negative":    func(c *Config) { c.DegradeWindow = -1 },
 		"HandoverCooldown negative": func(c *Config) { c.HandoverCooldown = -1 },
 	}
 	for name, mutate := range cases {

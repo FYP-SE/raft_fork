@@ -110,6 +110,9 @@ func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) e
 					return err
 				}
 				cfg.NonHeirBackoff = f
+			case "heir-lease":
+				// DESIGN_UPDATE.md D2.
+				arg.Scan(t, i, &cfg.HeirLease)
 			case "heir-log-priority":
 				// T4.7 (TASKS.md): send to the heir first in bcastAppend
 				// (DESIGN.md §2.7).

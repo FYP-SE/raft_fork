@@ -80,6 +80,8 @@ func TestHeirTimeout_Validation(t *testing.T) {
 	// HeirElection off: HeirTimeout is unused and never rejected.
 	cfg = newTestConfig(1, 2, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
 	cfg.HeirElection = false
+	cfg.HeirLogPriority = false  // explicit, regardless of RAFT_HEIRRAFT_FORCE_ON
+	cfg.GracefulHandover = false // (heir_conformance_test.go)
 	cfg.StabilityScorer = nil
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("HeirElection off, ET=2: validate(): %v", err)

@@ -7,8 +7,9 @@ import "sync"
 // simulate a node's stability changing over time -- e.g. a healthy leader
 // degrading to trigger a graceful handover (DESIGN.md §2.6).
 type Var struct {
-	mu sync.Mutex
-	v  uint8
+	mu       sync.Mutex
+	v        uint8
+	critical bool
 }
 
 // NewVar returns a Var reporting the given initial score.
@@ -28,4 +29,18 @@ func (s *Var) Score() uint8 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.v
+}
+
+// SetCritical sets what Critical reports.
+func (s *Var) SetCritical(c bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.critical = c
+}
+
+// Critical implements CriticalReporter.
+func (s *Var) Critical() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.critical
 }

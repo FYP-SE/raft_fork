@@ -80,18 +80,26 @@ func TestHeirPersistence_ClearedOnTermChange(t *testing.T) {
 	}
 }
 
-// The leader stamps an explicit 0 when HeirElection is on and it has no
-// heir, so followers drop a heir the leader dropped.
+// Once a heir was announced this term, dropping it stamps an explicit 0, so
+// followers drop a heir the leader dropped. Before any heir the stamp stays
+// nil (messages identical to stock; upstream conformance tests compare
+// exact messages -- found 2026-09-28 with RAFT_HEIRRAFT_FORCE_ON).
 func TestHeirPersistence_LeaderStampsExplicitZero(t *testing.T) {
 	r := newPersistenceTestRaft(t, 1)
-	r.heir = None
-	got := r.heirStamp()
-	if got == nil || *got != 0 {
-		t.Fatalf("heirStamp() = %v, want pointer to 0 when HeirElection is on and no heir is set", got)
+	if got := r.heirStamp(); got != nil {
+		t.Fatalf("heirStamp() = %v, want nil before any heir this term", got)
 	}
-	r.heir = 2
+	r.changeHeir(2)
 	if got := r.heirStamp(); got == nil || *got != 2 {
 		t.Fatalf("heirStamp() = %v, want pointer to 2", got)
+	}
+	r.changeHeir(None)
+	if got := r.heirStamp(); got == nil || *got != 0 {
+		t.Fatalf("heirStamp() = %v, want pointer to 0 after the heir is dropped", got)
+	}
+	r.reset(r.Term + 1)
+	if got := r.heirStamp(); got != nil {
+		t.Fatalf("heirStamp() = %v, want nil again in a new term", got)
 	}
 }
 

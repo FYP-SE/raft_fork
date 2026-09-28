@@ -103,7 +103,7 @@ func TestEWMAScorer_WeightedComposite(t *testing.T) {
 		t.Fatalf("NewEWMAScorer: %v", err)
 	}
 	for i := 0; i < 200; i++ {
-		s.Sample(SignalCPU, 0)   // stays fully healthy
+		s.Sample(SignalCPU, 0)      // stays fully healthy
 		s.Sample(SignalMemory, 100) // stays fully unhealthy
 	}
 	got := s.Score()

@@ -302,9 +302,8 @@ func TestRaftReset_ClearsHeirSoftStateButNotChurn(t *testing.T) {
 
 func TestRaft_HeirStamp(t *testing.T) {
 	r := newHeirTestRaft(t)
-	// DESIGN_UPDATE.md D4: HeirElection on -> explicit 0, not nil.
-	if got := r.heirStamp(); got == nil || *got != 0 {
-		t.Fatalf("heirStamp() = %v, want pointer to 0 before any heir is selected", got)
+	if got := r.heirStamp(); got != nil {
+		t.Fatalf("heirStamp() = %v, want nil before any heir is selected", got)
 	}
 	r.heir = 2
 	got := r.heirStamp()
