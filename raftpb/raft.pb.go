@@ -564,10 +564,23 @@ type Message struct {
 	// default) on all messages when HeirElection/HeirLogPriority are off, so
 	// wire format is byte-identical to stock in that mode. Field numbers 15/16
 	// (not 14) because 14 is already taken by responses above.
-	Stability     *uint32 `protobuf:"varint,15,opt,name=stability" json:"stability,omitempty"`
-	Heir          *uint64 `protobuf:"varint,16,opt,name=heir" json:"heir,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Stability *uint32 `protobuf:"varint,15,opt,name=stability" json:"stability,omitempty"`
+	Heir      *uint64 `protobuf:"varint,16,opt,name=heir" json:"heir,omitempty"`
+	// rtt, send_time, sequence_id and heartbeat_interval are Dynatune
+	// (Shiozaki, IPDPSW 2025) additions. The leader stamps MsgHeartbeat with
+	// its last measured RTT to the follower (ns), the send time (unix ns) and a
+	// per-follower heartbeat sequence id; the follower echoes rtt/send_time on
+	// MsgHeartbeatResp together with the heartbeat interval it recommends (ms,
+	// -1 = none computed yet). All unset (proto2 default) unless Dynatune is
+	// enabled, so wire format is byte-identical to stock otherwise. Numbers
+	// 17-20, not the reference implementation's 15-18, which collide with
+	// stability/heir above.
+	Rtt               *int64 `protobuf:"varint,17,opt,name=rtt" json:"rtt,omitempty"`
+	SendTime          *int64 `protobuf:"varint,18,opt,name=send_time,json=sendTime" json:"send_time,omitempty"`
+	SequenceId        *int64 `protobuf:"varint,19,opt,name=sequence_id,json=sequenceId" json:"sequence_id,omitempty"`
+	HeartbeatInterval *int64 `protobuf:"varint,20,opt,name=heartbeat_interval,json=heartbeatInterval" json:"heartbeat_interval,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Message) Reset() {
@@ -708,6 +721,34 @@ func (x *Message) GetStability() uint32 {
 func (x *Message) GetHeir() uint64 {
 	if x != nil && x.Heir != nil {
 		return *x.Heir
+	}
+	return 0
+}
+
+func (x *Message) GetRtt() int64 {
+	if x != nil && x.Rtt != nil {
+		return *x.Rtt
+	}
+	return 0
+}
+
+func (x *Message) GetSendTime() int64 {
+	if x != nil && x.SendTime != nil {
+		return *x.SendTime
+	}
+	return 0
+}
+
+func (x *Message) GetSequenceId() int64 {
+	if x != nil && x.SequenceId != nil {
+		return *x.SequenceId
+	}
+	return 0
+}
+
+func (x *Message) GetHeartbeatInterval() int64 {
+	if x != nil && x.HeartbeatInterval != nil {
+		return *x.HeartbeatInterval
 	}
 	return 0
 }
@@ -1092,7 +1133,7 @@ const file_raft_proto_rawDesc = "" +
 	"\x04term\x18\x03 \x01(\x04R\x04term\"T\n" +
 	"\bSnapshot\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x124\n" +
-	"\bmetadata\x18\x02 \x01(\v2\x18.raftpb.SnapshotMetadataR\bmetadata\"\xd0\x03\n" +
+	"\bmetadata\x18\x02 \x01(\v2\x18.raftpb.SnapshotMetadataR\bmetadata\"\xcf\x04\n" +
 	"\aMessage\x12'\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x13.raftpb.MessageTypeR\x04type\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\x04R\x02to\x12\x12\n" +
@@ -1112,7 +1153,12 @@ const file_raft_proto_rawDesc = "" +
 	"\acontext\x18\f \x01(\fR\acontext\x12-\n" +
 	"\tresponses\x18\x0e \x03(\v2\x0f.raftpb.MessageR\tresponses\x12\x1c\n" +
 	"\tstability\x18\x0f \x01(\rR\tstability\x12\x12\n" +
-	"\x04heir\x18\x10 \x01(\x04R\x04heir\"K\n" +
+	"\x04heir\x18\x10 \x01(\x04R\x04heir\x12\x10\n" +
+	"\x03rtt\x18\x11 \x01(\x03R\x03rtt\x12\x1b\n" +
+	"\tsend_time\x18\x12 \x01(\x03R\bsendTime\x12\x1f\n" +
+	"\vsequence_id\x18\x13 \x01(\x03R\n" +
+	"sequenceId\x12-\n" +
+	"\x12heartbeat_interval\x18\x14 \x01(\x03R\x11heartbeatInterval\"K\n" +
 	"\tHardState\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x12\n" +
 	"\x04vote\x18\x02 \x01(\x04R\x04vote\x12\x16\n" +

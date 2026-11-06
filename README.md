@@ -199,3 +199,47 @@ This approach introduces a problem when removing a member from a two-member clus
 ## Go docs
 
 More detailed development documentation can be found in go docs: https://pkg.go.dev/go.etcd.io/raft/v3.
+
+<!-- DYNATUNE-README-MARKER -->
+# Dynatune (experimental, this fork)
+
+Besides HeirRaft (see `design.md`), this fork contains an optional implementation of **Dynatune**
+(Shiozaki, "Dynatune: Dynamic Tuning of Raft Election Parameters Using Network Measurement",
+IPDPSW 2025, doi:10.1109/IPDPSW66978.2025.00091), ported from `distsys-lab/raft` @ `cdc18d1`.
+It is **off by default**: with `Config.Dynatune == false` nothing is allocated, no field is added to any
+message and the heartbeat schedule is stock.
+
+**What it does.** Each follower measures the round-trip time (RTT) the leader reports in heartbeats and
+detects lost heartbeats from gaps in a per-follower sequence number. From that it
+(1) sets its own election timeout to `mean(RTT) + ElectionSafetyFactor * stddev(RTT)` (whole ms, drawn from
+`[base, 2*base)`; the stock draw when that is 0) and (2) asks the leader for a heartbeat interval
+`floor(timeout / (ceil(ln(1-goal)/ln(loss)) + 1))` (or `timeout/(K+1)`). The leader keeps one heartbeat
+schedule per follower.
+
+**Using it.**
+```go
+cfg := &raft.Config{ /* ... */ Dynatune: true, OptimizeHeartbeatInterval: true }
+```
+Tunables (zero = default): `MaxElectionMetricsCapacity`, `MinElectionMetricsCapacity`,
+`ElectionSafetyFactor`, `HeartbeatReachabilityGoal`, `K`, `OptimizeHeartbeatInterval`; `Clock` injects the
+clock used for RTT measurement (tests). **The application must tick raft once per millisecond** when
+Dynatune is on: `ElectionTick`/`HeartbeatTick` are then in milliseconds. Heartbeats are expected to travel
+over an unreliable (UDP-like) channel, otherwise loss is invisible (see etcd_fork `rafthttp/udp.go`).
+
+**Where.** `dynatune.go` (pure data structures and formulas), call sites in `raft.go` each guarded by
+`if r.dynatune`, `Message` fields `rtt/send_time/sequence_id/heartbeat_interval` = 17-20 in
+`raftpb/raft.proto` (the reference uses 15-18, which collide with HeirRaft's `stability`/`heir`).
+Not supported together with the HeirRaft flags.
+
+**Faithful to the reference, including its quirks** (running sum-of-squares deviation, negative loss from
+duplicate sequence ids, per-term ms truncation, interval = timeout/2 at zero loss). **Deliberate guards
+beyond it:** a non-positive variance reads as 0 (the reference turns NaN into the minimum int64 and
+silently disables tuning once its window wraps - found by the simulation), total loss yields interval 1,
+negative RTT is clamped, no nil dereference for peers added after the election or responses without the
+Dynatune fields.
+
+**Tests (79).** `dynatune_test.go` (pure maths), `dynatune_config_test.go`, `dynatune_raft_test.go`
+(leader, follower, elections, off-switch guards), `dynatune_sim_test.go` + `dynatune_sim_scenarios_test.go`
+(deterministic 3-node simulation: tuning tracks RTT, detection speed, LAN no-gain, loss), and
+`raftpb/dynatune_wire_test.go`. `go test ./...` passes; `-race` has not been run yet (needs cgo).
+`scripts/genproto.sh` needs protoc 3.20.3.

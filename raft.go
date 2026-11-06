@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -385,6 +386,39 @@ type Config struct {
 	// HandoverCooldown is the minimum number of election timeouts between
 	// voluntary graceful handovers, to prevent ping-pong. Default: 10.
 	HandoverCooldown int
+
+	// Dynatune enables election-timeout and heartbeat-interval tuning from
+	// measured RTT and packet loss (Shiozaki, IPDPSW 2025; see dynatune.go).
+	// It is the master switch for everything below: false (the default) keeps
+	// raft byte-identical to stock -- nothing is allocated, no field is added
+	// to any message, the heartbeat schedule is unchanged.
+	//
+	// With it on, the application must tick raft once per MILLISECOND:
+	// ElectionTick and HeartbeatTick are then in milliseconds and the tuned
+	// timeouts are computed directly in milliseconds.
+	Dynatune bool
+	// MaxElectionMetricsCapacity / MinElectionMetricsCapacity bound the
+	// follower's sliding window of RTT and sequence-id samples; tuning starts
+	// only once the window holds MORE than the minimum. Zero means default.
+	MaxElectionMetricsCapacity int
+	MinElectionMetricsCapacity int
+	// ElectionSafetyFactor multiplies the RTT standard deviation in the base
+	// election timeout (mean + factor*stddev). Zero means default.
+	ElectionSafetyFactor int
+	// HeartbeatReachabilityGoal is the probability, in (0,1), that at least
+	// one heartbeat arrives within one election window; used when
+	// OptimizeHeartbeatInterval is set. Zero means default.
+	HeartbeatReachabilityGoal float64
+	// K is the fixed heartbeat:election ratio (interval = timeout/(K+1)) used
+	// when OptimizeHeartbeatInterval is false. Zero means default.
+	K int64
+	// OptimizeHeartbeatInterval derives the requested heartbeat interval from
+	// the measured packet loss instead of the fixed ratio K.
+	OptimizeHeartbeatInterval bool
+	// Clock is the wall clock used for RTT and campaign-duration measurement.
+	// nil means time.Now. Tests inject a fake clock to make the measurements
+	// deterministic.
+	Clock func() time.Time
 }
 
 func (c *Config) validate() error {
@@ -435,6 +469,10 @@ func (c *Config) validate() error {
 	}
 
 	if err := c.validateHeirRaft(); err != nil {
+		return err
+	}
+
+	if err := c.validateDynatune(); err != nil {
 		return err
 	}
 
@@ -696,6 +734,24 @@ type raft struct {
 	// log lag at crash time. Dispatch ordering only -- commit rule, quorum
 	// semantics and acknowledgement handling are untouched.
 	heirLogPriority bool
+
+	// Dynatune state (see dynatune.go). All nil/zero unless Config.Dynatune.
+	// dynatune mirrors Config.Dynatune: the master switch every Dynatune code
+	// path in this file is gated on.
+	dynatune                  bool
+	electionSafetyFactor      int
+	heartbeatReachabilityGoal float64
+	k                         int64
+	optimizeHeartbeatInterval bool
+	followerMetrics           *followerMetrics
+	leaderMetrics             *leaderMetrics
+	heartbeatStates           map[uint64]*heartbeatState
+	// Election-duration bookkeeping, see "Elections" in dynatune.go.
+	campaignAttemptTimestamp time.Time
+	lastCampaignTimeTaken    time.Duration
+	lastElectionFailed       bool
+	// clock is Config.Clock, defaulted to time.Now.
+	clock func() time.Time
 }
 
 func newRaft(c *Config) *raft {
@@ -742,6 +798,7 @@ func newRaft(c *Config) *raft {
 		handoverCooldown:            c.HandoverCooldown,
 		heirLogPriority:             c.HeirLogPriority,
 	}
+	r.initDynatune(c)
 
 	traceInitState(r)
 
@@ -981,13 +1038,17 @@ func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 	// The leader MUST NOT forward the follower's commit to
 	// an unmatched index.
 	commit := min(pr.Match, r.raftLog.committed)
-	r.send(&pb.Message{
+	m := &pb.Message{
 		To:      new(to),
 		Type:    pb.MsgHeartbeat.Enum(),
 		Commit:  new(commit),
 		Context: ctx,
 		Heir:    r.heirStamp(),
-	})
+	}
+	if r.dynatune {
+		r.stampHeartbeat(m, to)
+	}
+	r.send(m)
 	pr.SentCommit(commit)
 }
 
@@ -1221,6 +1282,12 @@ func (r *raft) tickHeartbeat() {
 		return
 	}
 
+	if r.dynatune {
+		// Per-follower schedule instead of the single shared MsgBeat timer.
+		r.tickHeartbeatSchedule()
+		return
+	}
+
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
 		if err := r.Step(&pb.Message{From: new(r.id), Type: pb.MsgBeat.Enum()}); err != nil {
@@ -1235,6 +1302,10 @@ func (r *raft) becomeFollower(term uint64, lead uint64) {
 	r.tick = r.tickElection
 	r.lead = lead
 	r.state = StateFollower
+	if r.dynatune {
+		r.followerMetrics.reset()
+		r.applyPostLossTimeout()
+	}
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
 
 	traceBecomeFollower(r)
@@ -1250,6 +1321,9 @@ func (r *raft) becomeCandidate() {
 	r.tick = r.tickElection
 	r.Vote = r.id
 	r.state = StateCandidate
+	if r.dynatune {
+		r.followerMetrics.reset()
+	}
 	r.logger.Infof("%x became candidate at term %d", r.id, r.Term)
 
 	traceBecomeCandidate(r)
@@ -1268,6 +1342,12 @@ func (r *raft) becomePreCandidate() {
 	r.tick = r.tickElection
 	r.lead = None
 	r.state = StatePreCandidate
+	if r.dynatune {
+		r.followerMetrics.reset()
+		// no reset() here, so redraw explicitly: a stalled round must not
+		// retry on a stale (possibly tuned) timeout
+		r.resetRandomizedElectionTimeout()
+	}
 
 	// becomePreCandidate does not call reset(), so a PreCandidate round
 	// that stalls would otherwise retry on whatever timeout was last drawn.
@@ -1318,6 +1398,9 @@ func (r *raft) becomeLeader() {
 	// so the preceding log append does not count against the uncommitted log
 	// quota of the new leader. In other words, after the call to appendEntry,
 	// r.uncommittedSize is still 0.
+	if r.dynatune {
+		r.resetHeartbeatSchedule()
+	}
 	r.logger.Infof("%x became leader at term %d", r.id, r.Term)
 }
 
@@ -1420,6 +1503,9 @@ func (r *raft) campaign(t CampaignType) {
 			ctx = []byte(t)
 		}
 		r.send(&pb.Message{To: new(id), Term: new(term), Type: voteMsg.Enum(), Index: new(last.index), LogTerm: new(last.term), Context: ctx})
+	}
+	if r.dynatune && voteMsg == pb.MsgPreVote {
+		r.recordPreVoteAttempt()
 	}
 }
 
@@ -1703,6 +1789,9 @@ func stepLeader(r *raft, m *pb.Message) error {
 		if !r.appendEntry(m.GetEntries()...) {
 			return ErrProposalDropped
 		}
+		if r.dynatune {
+			r.resetHeartbeatElapsed()
+		}
 		r.bcastAppend()
 		return nil
 	case pb.MsgReadIndex:
@@ -1936,6 +2025,9 @@ func stepLeader(r *raft, m *pb.Message) error {
 			}
 		}
 	case pb.MsgHeartbeatResp:
+		if r.dynatune {
+			r.handleHeartbeatRespDynatune(m)
+		}
 		pr.RecentActive = true
 		pr.LastAckTick = r.leaderTicks
 		pr.MsgAppFlowPaused = false
@@ -2065,6 +2157,9 @@ func stepCandidate(r *raft, m *pb.Message) error {
 		switch res {
 		case quorum.VoteWon:
 			if r.state == StatePreCandidate {
+				if r.dynatune {
+					r.recordPreVoteWon()
+				}
 				r.campaign(campaignElection)
 			} else {
 				r.becomeLeader()
@@ -2073,6 +2168,9 @@ func stepCandidate(r *raft, m *pb.Message) error {
 		case quorum.VoteLost:
 			// pb.MsgPreVoteResp contains future term of pre-candidate
 			// m.Term > r.Term; reuse r.Term
+			if r.dynatune {
+				r.recordPreVoteLost()
+			}
 			r.becomeFollower(r.Term, None)
 		}
 	case pb.MsgTimeoutNow:
@@ -2503,7 +2601,11 @@ func (r *raft) handleAppendEntries(m *pb.Message) {
 func (r *raft) handleHeartbeat(m *pb.Message) {
 	r.recordHeir(m)
 	r.raftLog.commitTo(m.GetCommit())
-	r.send(&pb.Message{To: m.From, Type: pb.MsgHeartbeatResp.Enum(), Context: m.GetContext(), Stability: r.stabilityStamp()})
+	resp := &pb.Message{To: m.From, Type: pb.MsgHeartbeatResp.Enum(), Context: m.GetContext(), Stability: r.stabilityStamp()}
+	if r.dynatune {
+		r.tuneFromHeartbeat(m, resp)
+	}
+	r.send(resp)
 }
 
 func (r *raft) handleSnapshot(m *pb.Message) {

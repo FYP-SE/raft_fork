@@ -43,8 +43,10 @@ func TestProtoMemorySizes(t *testing.T) {
 	var m Message
 	// Message grew by two pointer-sized fields (Stability *uint32, Heir
 	// *uint64) added for HeirRaft in T4.2 (TASKS.md) -- +16 bytes on 64-bit,
-	// +8 on 32-bit.
-	assert.Equal(t, if64Bit(216, 108), unsafe.Sizeof(m), "Message size check")
+	// +8 on 32-bit. Then four more pointer-sized fields (Rtt, SendTime,
+	// SequenceId, HeartbeatInterval, all *int64) added for the Dynatune port
+	// (task C3) -- +32 bytes on 64-bit, +16 on 32-bit.
+	assert.Equal(t, if64Bit(248, 124), unsafe.Sizeof(m), "Message size check")
 
 	var hs HardState
 	assert.Equal(t, if64Bit(64, 32), unsafe.Sizeof(hs), "HardState size check")

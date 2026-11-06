@@ -104,6 +104,19 @@ message Message {
 	// (not 14) because 14 is already taken by responses above.
 	optional uint32      stability   = 15;
 	optional uint64      heir        = 16;
+	// rtt, send_time, sequence_id and heartbeat_interval are Dynatune
+	// (Shiozaki, IPDPSW 2025) additions. The leader stamps MsgHeartbeat with
+	// its last measured RTT to the follower (ns), the send time (unix ns) and a
+	// per-follower heartbeat sequence id; the follower echoes rtt/send_time on
+	// MsgHeartbeatResp together with the heartbeat interval it recommends (ms,
+	// -1 = none computed yet). All unset (proto2 default) unless Dynatune is
+	// enabled, so wire format is byte-identical to stock otherwise. Numbers
+	// 17-20, not the reference implementation's 15-18, which collide with
+	// stability/heir above.
+	optional int64       rtt                = 17;
+	optional int64       send_time          = 18;
+	optional int64       sequence_id        = 19;
+	optional int64       heartbeat_interval = 20;
 }
 
 message HardState {
