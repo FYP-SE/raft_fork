@@ -504,8 +504,11 @@ func (r *raft) tuneFromHeartbeat(m, resp *pb.Message) {
 			// Sub-millisecond link: nothing to tune from, so use the stock draw.
 			r.resetRandomizedElectionTimeout()
 		}
-		interval = heartbeatIntervalMs(r.randomizedElectionTimeout, fm.calculatePacketLossRate(),
+		loss := fm.calculatePacketLossRate()
+		interval = heartbeatIntervalMs(r.randomizedElectionTimeout, loss,
 			r.heartbeatReachabilityGoal, r.k, r.optimizeHeartbeatInterval)
+		r.logger.Debugf("dynatune: RTT mean %v sd %v -> base timeout %d ms, election timeout drawn %d ms; loss %.3f -> asking the leader for a %d ms heartbeat interval",
+			fm.getMean(), fm.getStdDev(), base, r.randomizedElectionTimeout, loss, interval)
 	}
 	resp.HeartbeatInterval = new(interval)
 }
@@ -577,7 +580,9 @@ func (r *raft) resetHeartbeatElapsed() {
 func (r *raft) handleHeartbeatRespDynatune(m *pb.Message) {
 	from := m.GetFrom()
 	if m.SendTime != nil {
-		r.leaderMetrics.updateRTT(from, rttSince(r.clock(), m.GetSendTime()))
+		rtt := rttSince(r.clock(), m.GetSendTime())
+		r.leaderMetrics.updateRTT(from, rtt)
+		r.logger.Debugf("dynatune: RTT to %x is %v", from, rtt)
 	}
 	if m.HeartbeatInterval != nil {
 		// -1 (or any negative value) means "none computed yet". The cap keeps
@@ -588,6 +593,7 @@ func (r *raft) handleHeartbeatRespDynatune(m *pb.Message) {
 				iv = int64(r.electionTimeout)
 			}
 			r.heartbeatStateFor(from).timeout = int(iv)
+			r.logger.Debugf("dynatune: heartbeat interval for %x is now %d ms", from, iv)
 		}
 	}
 }
