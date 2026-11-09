@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -387,6 +388,24 @@ type Config struct {
 	// HandoverCooldown is the minimum number of election timeouts between
 	// voluntary graceful handovers, to prevent ping-pong. Default: 10.
 	HandoverCooldown int
+
+	// HeirRTTRank changes how the leader picks the heir among eligible
+	// followers (DESIGN_UPDATE.md E8): stability score becomes a gate --
+	// a follower is healthy if its score is within HysteresisMargin of the
+	// healthiest eligible follower -- and the healthy follower with the
+	// lowest round-trip time from the leader wins. The nearest follower
+	// receives the leader's entries first, so it is the most likely to hold
+	// the freshest log when the leader crashes (a hypothesis under test, not
+	// a guarantee: equal RTTs give no ordering). Requires HeirElection and
+	// PeerRTT. Off: selection is the score ranking of DESIGN_UPDATE.md D5/D6.
+	HeirRTTRank bool
+	// PeerRTT supplies the leader's current RTT estimate to each peer. Read
+	// once per heartbeat interval on the leader. Required by HeirRTTRank.
+	PeerRTT PeerRTTProvider
+	// HeirRTTMargin is how much lower a challenger's RTT must be before it
+	// replaces a healthy heir (churn control, like HysteresisMargin for
+	// scores). Default: 2ms.
+	HeirRTTMargin time.Duration
 }
 
 func (c *Config) validate() error {
@@ -508,6 +527,14 @@ func (c *Config) validateHeirRaft() error {
 		c.HandoverCooldown = 10
 	} else if c.HandoverCooldown < 0 {
 		return errors.New("HandoverCooldown must be >= 0")
+	}
+	if c.HeirRTTRank && (!c.HeirElection || c.PeerRTT == nil) {
+		return errors.New("HeirRTTRank requires HeirElection and a non-nil PeerRTT")
+	}
+	if c.HeirRTTMargin == 0 {
+		c.HeirRTTMargin = 2 * time.Millisecond
+	} else if c.HeirRTTMargin < 0 {
+		return errors.New("HeirRTTMargin must be >= 0")
 	}
 
 	return nil
@@ -651,6 +678,12 @@ type raft struct {
 	// heirTenure counts consecutive heartbeat intervals r.heir has held the
 	// role, for the minHeirTenure hysteresis check in selectHeir.
 	heirTenure int
+
+	// heirRTTRank, peerRTT and heirRTTMargin mirror the matching Config
+	// fields (DESIGN_UPDATE.md E8; heir_rtt.go).
+	heirRTTRank   bool
+	peerRTT       PeerRTTProvider
+	heirRTTMargin time.Duration
 	// heirChurn counts every replacement (or loss) of a previously-set heir
 	// over this raft instance's lifetime (DESIGN.md §2.3: "heir-churn count
 	// is a first-class metric"). Deliberately NOT reset in (*raft).reset --
@@ -743,6 +776,9 @@ func newRaft(c *Config) *raft {
 		degradeWindow:               c.DegradeWindow,
 		handoverCooldown:            c.HandoverCooldown,
 		heirLogPriority:             c.HeirLogPriority,
+		heirRTTRank:                 c.HeirRTTRank,
+		peerRTT:                     c.PeerRTT,
+		heirRTTMargin:               c.HeirRTTMargin,
 	}
 
 	traceInitState(r)
@@ -2239,6 +2275,7 @@ func (r *raft) selectHeir() {
 	var bestID uint64
 	var bestScore uint8
 	found := false
+	var candidates []heirCandidate // eligible followers, for HeirRTTRank
 	r.trk.Visit(func(id uint64, pr *tracker.Progress) {
 		if _, ok := voters[id]; !ok || id == r.id {
 			return
@@ -2255,6 +2292,9 @@ func (r *raft) selectHeir() {
 		if bits.OnesCount8(pr.HeirSyncHistory) < heirEntryNeeded {
 			return
 		}
+		if r.heirRTTRank {
+			candidates = append(candidates, heirCandidate{id: id, score: pr.StabilityScore})
+		}
 		// Visit iterates in ascending ID order, so strict > keeps the
 		// lowest ID on a score tie.
 		if !found || pr.StabilityScore > bestScore {
@@ -2265,6 +2305,10 @@ func (r *raft) selectHeir() {
 	curPr := r.trk.Progress[r.heir]
 	_, curVoter := voters[r.heir]
 	keep := r.heir != None && curPr != nil && curVoter && curPr.HeirOutOfSyncTicks < r.heirSyncGrace
+	if r.heirRTTRank {
+		r.selectHeirByRTT(candidates, bestScore, keep)
+		return
+	}
 	if !keep {
 		if found {
 			r.changeHeir(bestID)
