@@ -312,9 +312,11 @@ type Config struct {
 	// scorer set.
 	StabilityScorer stability.Scorer
 
-	// HeirElection enables heir-biased randomized election timeouts
-	// (DESIGN.md §2.5): the heir fires first on leader crash, non-heirs
-	// deliberately wait longer. Requires StabilityScorer to be set.
+	// HeirElection enables the heir's short election timeout
+	// (DESIGN_UPDATE.md D1): the heir draws HeirTimeout ticks plus jitter,
+	// below ElectionTick, so it campaigns first on leader crash. Non-heirs
+	// keep stock timing at the default NonHeirBackoff of 1.0 (D3). Requires
+	// StabilityScorer to be set.
 	HeirElection bool
 	// HeirLease lets a voter skip the CheckQuorum lease for one sender only:
 	// the heir the leader announced to it, and only once the voter itself
@@ -2326,7 +2328,8 @@ func (r *raft) heirLeaseThreshold() int {
 // from now (electionElapsed is 0 at every draw site). DESIGN_UPDATE.md D1:
 //
 //   - Inside the heir window: heirTimeout + rand[0, jitter] ticks, jitter at
-//     least one tick, capped below electionTimeout -- as long as firing then
+//     least one tick unless capped by electionTimeout-1-heirTimeout (0 when
+//     heirTimeout = electionTimeout-1) -- as long as firing then
 //     still falls inside the window (heirSilence + draw < electionTimeout).
 //   - Otherwise the heir is an ordinary node: it fires at the total silence
 //     T a stock draw from [electionTimeout, 2*electionTimeout) gives, i.e.
@@ -2721,14 +2724,15 @@ func (r *raft) pastElectionTimeout() bool {
 
 // resetRandomizedElectionTimeout draws this node's next randomized election
 // timeout. Vanilla Raft always draws uniformly from
-// [electionTimeout, 2*electionTimeout). HeirRaft (DESIGN.md §2.5) biases the
-// draw by this node's belief about the heir for this term, read via
-// currentHeir:
+// [electionTimeout, 2*electionTimeout). HeirRaft biases the draw by this
+// node's belief about the heir for this term, read via currentHeir
+// (DESIGN_UPDATE.md D1/D3):
 //
-//   - This node believes it is the heir: fires first, almost deterministically
-//     (electionTimeout + a small jitter).
-//   - This node knows of a different live heir: deliberately waits longer,
-//     so the heir gets to campaign uncontested.
+//   - This node believes it is the heir: heirDraw, i.e. HeirTimeout ticks
+//     plus a small jitter, below electionTimeout (default 3-4 ticks), with a
+//     fallback to the stock total silence once the heir window has passed.
+//   - This node knows of a different live heir: NonHeirBackoff*T + rand(T).
+//     At the default NonHeirBackoff of 1.0 this is exactly stock's [T, 2T).
 //   - No heir known, or HeirElection is off: exactly vanilla Raft, so
 //     behaviour is byte-identical when HeirRaft is disabled (CLAUDE.md
 //     constraint 4).
